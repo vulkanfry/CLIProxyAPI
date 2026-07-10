@@ -1579,3 +1579,48 @@ func testValidGrokEncryptedContent() string {
 	}
 	return base64.RawStdEncoding.EncodeToString(buf[:256])
 }
+
+func TestNormalizeXAIInputCustomToolItems(t *testing.T) {
+	body := []byte(`{
+		"model":"grok-4.5",
+		"input":[
+			{"type":"message","role":"user","content":[{"type":"input_text","text":"hi"}]},
+			{"type":"custom_tool_call","call_id":"c2","name":"exec","input":"pwd"},
+			{"type":"custom_tool_call_output","call_id":"c2","output":[{"type":"input_text","text":"/tmp"}]}
+		]
+	}`)
+	out := normalizeXAIInputCustomToolItems(body)
+
+	if got := gjson.GetBytes(out, "input.1.type").String(); got != "function_call" {
+		t.Fatalf("input.1.type = %q, want function_call; body=%s", got, string(out))
+	}
+	if got := gjson.GetBytes(out, "input.1.arguments").String(); got != `{"input":"pwd"}` {
+		t.Fatalf("input.1.arguments = %q, want {\"input\":\"pwd\"}; body=%s", got, string(out))
+	}
+	if gjson.GetBytes(out, "input.1.input").Exists() {
+		t.Fatalf("custom input field should be removed: %s", string(out))
+	}
+	if got := gjson.GetBytes(out, "input.2.type").String(); got != "function_call_output" {
+		t.Fatalf("input.2.type = %q, want function_call_output; body=%s", got, string(out))
+	}
+	if got := gjson.GetBytes(out, "input.2.output").String(); got != "/tmp" {
+		t.Fatalf("input.2.output = %q, want /tmp; body=%s", got, string(out))
+	}
+}
+
+func TestNormalizeXAITool_CustomProjectsInputParameter(t *testing.T) {
+	tool := gjson.Parse(`{"type":"custom","name":"exec","description":"run"}`)
+	raw, changed, ok := normalizeXAITool(tool, "")
+	if !ok {
+		t.Fatal("normalizeXAITool failed")
+	}
+	if !changed {
+		t.Fatal("expected custom tool conversion to change tool")
+	}
+	if got := gjson.GetBytes(raw, "type").String(); got != "function" {
+		t.Fatalf("type = %q, want function", got)
+	}
+	if got := gjson.GetBytes(raw, "parameters.properties.input.type").String(); got != "string" {
+		t.Fatalf("parameters missing input string field: %s", string(raw))
+	}
+}

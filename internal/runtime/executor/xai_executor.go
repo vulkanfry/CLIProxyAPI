@@ -51,6 +51,9 @@ const (
 	xaiAutomationUpdateToolName = "automation_update"
 	// Permissive placeholder schema: keeps the tool callable without the hang.
 	xaiSafeFunctionParameters   = `{"type":"object","properties":{},"additionalProperties":true}`
+	// Codex custom tools are free-form input strings. xAI only accepts function tools, so we
+	// project custom tools onto a single string field that history items can fill.
+	xaiCustomAsFunctionParameters = `{"type":"object","properties":{"input":{"type":"string"}},"required":["input"],"additionalProperties":true}`
 	xaiImagesGenerationsPath    = "/images/generations"
 	xaiImagesEditsPath          = "/images/edits"
 	xaiDefaultImageEndpointPath = xaiImagesGenerationsPath
@@ -853,6 +856,7 @@ func (e *XAIExecutor) prepareResponsesRequestTo(ctx context.Context, req cliprox
 	}
 	body = normalizeXAIInputReasoningItems(body)
 	body = sanitizeXAIInputEncryptedContent(body)
+	body = normalizeXAIInputCustomToolItems(body)
 	body = normalizeCodexInstructions(body)
 	body = sanitizeXAIResponsesBody(body, baseModel)
 
@@ -1024,6 +1028,122 @@ func xaiMetadataString(meta map[string]any, key string) string {
 	}
 }
 
+
+// normalizeXAIInputCustomToolItems rewrites Codex custom tool history items into
+// function_call / function_call_output forms that xAI Responses accepts.
+// Without this, xAI returns 422: "data did not match any variant of untagged enum ModelInput".
+func normalizeXAIInputCustomToolItems(body []byte) []byte {
+	input := gjson.GetBytes(body, "input")
+	if !input.Exists() || !input.IsArray() {
+		return body
+	}
+
+	changed := false
+	items := make([]json.RawMessage, 0, len(input.Array()))
+	for _, item := range input.Array() {
+		raw := []byte(item.Raw)
+		switch strings.TrimSpace(item.Get("type").String()) {
+		case "custom_tool_call":
+			updated, errSet := sjson.SetBytes(raw, "type", "function_call")
+			if errSet != nil {
+				return body
+			}
+			raw = updated
+			if !item.Get("arguments").Exists() {
+				args := xaiCustomToolInputAsFunctionArguments(item.Get("input"))
+				updated, errSet = sjson.SetBytes(raw, "arguments", args)
+				if errSet != nil {
+					return body
+				}
+				raw = updated
+			}
+			// Drop custom-only field so upstream ModelInput stays strict.
+			if item.Get("input").Exists() {
+				updated, errDel := sjson.DeleteBytes(raw, "input")
+				if errDel != nil {
+					return body
+				}
+				raw = updated
+			}
+			changed = true
+		case "custom_tool_call_output":
+			updated, errSet := sjson.SetBytes(raw, "type", "function_call_output")
+			if errSet != nil {
+				return body
+			}
+			raw = updated
+			out := item.Get("output")
+			if out.IsArray() || out.IsObject() {
+				updated, errSet = sjson.SetBytes(raw, "output", xaiCustomToolOutputAsString(out))
+				if errSet != nil {
+					return body
+				}
+				raw = updated
+			}
+			changed = true
+		}
+		items = append(items, json.RawMessage(raw))
+	}
+	if !changed {
+		return body
+	}
+
+	var buf bytes.Buffer
+	buf.WriteByte('[')
+	for i, item := range items {
+		if i > 0 {
+			buf.WriteByte(',')
+		}
+		buf.Write(item)
+	}
+	buf.WriteByte(']')
+	updated, err := sjson.SetRawBytes(body, "input", buf.Bytes())
+	if err != nil {
+		return body
+	}
+	log.Debugf("xai: normalized Codex custom_tool_call* input items for upstream Responses API")
+	return updated
+}
+
+func xaiCustomToolInputAsFunctionArguments(input gjson.Result) string {
+	if !input.Exists() {
+		return "{}"
+	}
+	// Prefer a stable object shape that matches xaiCustomAsFunctionParameters.
+	payload, err := json.Marshal(map[string]string{"input": input.String()})
+	if err != nil {
+		return "{}"
+	}
+	return string(payload)
+}
+
+func xaiCustomToolOutputAsString(output gjson.Result) string {
+	if !output.Exists() {
+		return ""
+	}
+	if output.Type == gjson.String {
+		return output.String()
+	}
+	if output.IsArray() {
+		var b strings.Builder
+		for _, part := range output.Array() {
+			switch strings.TrimSpace(part.Get("type").String()) {
+			case "input_text", "output_text", "text":
+				b.WriteString(part.Get("text").String())
+			default:
+				if part.Get("text").Exists() {
+					b.WriteString(part.Get("text").String())
+				} else if part.Type == gjson.String {
+					b.WriteString(part.String())
+				}
+			}
+		}
+		return b.String()
+	}
+	// Object or other JSON: keep raw for debugging rather than drop.
+	return output.Raw
+}
+
 func sanitizeXAIResponsesBody(body []byte, model string) []byte {
 	body = removeXAIEncryptedReasoningInclude(body)
 	if !xaiSupportsReasoningEffort(model) {
@@ -1132,6 +1252,14 @@ func normalizeXAITool(tool gjson.Result, namespaceName string) ([]byte, bool, bo
 			return nil, false, false
 		}
 		raw = updatedTool
+		// Ensure free-form custom tool input can be represented as function arguments.
+		if !tool.Get("parameters").Exists() || len(tool.Get("parameters").Map()) == 0 {
+			updatedTool, errSet = sjson.SetRawBytes(raw, "parameters", []byte(xaiCustomAsFunctionParameters))
+			if errSet != nil {
+				return nil, false, false
+			}
+			raw = updatedTool
+		}
 		toolType = xaiFunctionToolType
 		changed = true
 	}
@@ -1143,7 +1271,8 @@ func normalizeXAITool(tool gjson.Result, namespaceName string) ([]byte, bool, bo
 		raw = updatedTool
 		changed = true
 	}
-	if toolType == xaiFunctionToolType && !tool.Get("parameters").Exists() {
+	// Inspect the current raw tool (may already include projected custom parameters).
+	if toolType == xaiFunctionToolType && !gjson.GetBytes(raw, "parameters").Exists() {
 		updatedTool, errSet := sjson.SetRawBytes(raw, "parameters", []byte(`{"type":"object","properties":{}}`))
 		if errSet != nil {
 			return nil, false, false
