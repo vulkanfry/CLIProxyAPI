@@ -1702,7 +1702,7 @@ func TestNormalizeXAITool_DropsComputerUsePreview(t *testing.T) {
 }
 
 func TestCapXAITools_PrioritizesCoreAndDropsExcess(t *testing.T) {
-	// Build >200 tools: one web_search, one core function, many mcp tools.
+	// Build well above xaiMaxTools (128): one web_search, one core function, many mcp tools.
 	tools := `[{"type":"web_search"},{"type":"function","name":"shell","parameters":{"type":"object","properties":{}}}`
 	for i := 0; i < 250; i++ {
 		tools += fmt.Sprintf(`,{"type":"function","name":"mcp__grafana__tool_%d","parameters":{"type":"object","properties":{}}}`, i)
@@ -1713,6 +1713,9 @@ func TestCapXAITools_PrioritizesCoreAndDropsExcess(t *testing.T) {
 	n := gjson.GetBytes(out, "tools.#").Int()
 	if n != int64(xaiMaxTools) {
 		t.Fatalf("tools count=%d want %d", n, xaiMaxTools)
+	}
+	if xaiMaxTools != 128 {
+		t.Fatalf("xaiMaxTools=%d want 128 (xai-sdk-python documented function tool limit)", xaiMaxTools)
 	}
 	// web_search and shell should remain
 	foundWeb, foundShell := false, false
@@ -1794,5 +1797,108 @@ func TestNormalizeXAITool_ShellToFunction(t *testing.T) {
 	}
 	if gjson.GetBytes(raw, "name").String() != "shell" {
 		t.Fatalf("name=%s", gjson.GetBytes(raw, "name").String())
+	}
+}
+
+func TestNormalizeXAIMCPTool_KeepsPublicRemote(t *testing.T) {
+	tool := gjson.Parse(`{
+		"type":"mcp",
+		"server_url":"https://mcp.deepwiki.com/mcp",
+		"server_label":"deepwiki",
+		"server_description":"docs",
+		"allowed_tool_names":["search","fetch"],
+		"authorization":"Bearer t",
+		"extra_headers":{"X-Test":"1"},
+		"require_approval":"never",
+		"connector_id":"conn_1"
+	}`)
+	raw, changed, ok := normalizeXAITool(tool, "")
+	if !ok || !changed {
+		t.Fatalf("ok=%v changed=%v raw=%s", ok, changed, string(raw))
+	}
+	if gjson.GetBytes(raw, "type").String() != "mcp" {
+		t.Fatalf("type=%s raw=%s", gjson.GetBytes(raw, "type").String(), string(raw))
+	}
+	if got := gjson.GetBytes(raw, "server_url").String(); got != "https://mcp.deepwiki.com/mcp" {
+		t.Fatalf("server_url=%q", got)
+	}
+	if got := gjson.GetBytes(raw, "server_label").String(); got != "deepwiki" {
+		t.Fatalf("server_label=%q", got)
+	}
+	if got := gjson.GetBytes(raw, "allowed_tools.#").Int(); got != 2 {
+		t.Fatalf("allowed_tools count=%d raw=%s", got, string(raw))
+	}
+	if got := gjson.GetBytes(raw, "headers.X-Test").String(); got != "1" {
+		t.Fatalf("headers not mapped from extra_headers: %s", string(raw))
+	}
+	if gjson.GetBytes(raw, "require_approval").Exists() || gjson.GetBytes(raw, "connector_id").Exists() {
+		t.Fatalf("unsupported OpenAI fields should be stripped: %s", string(raw))
+	}
+}
+
+func TestNormalizeXAIMCPTool_DropsPrivateURLs(t *testing.T) {
+	cases := []string{
+		`{"type":"mcp","server_url":"http://127.0.0.1:3000/mcp","server_label":"local"}`,
+		`{"type":"mcp","server_url":"http://localhost:8080/mcp","server_label":"local"}`,
+		`{"type":"mcp","server_url":"http://10.0.0.5/mcp","server_label":"priv"}`,
+		`{"type":"mcp","server_url":"http://192.168.1.10/mcp","server_label":"priv"}`,
+		`{"type":"mcp","server_url":"http://mcp.local/mcp","server_label":"mdns"}`,
+		`{"type":"mcp","server_label":"no-url"}`,
+	}
+	for _, rawTool := range cases {
+		raw, changed, ok := normalizeXAITool(gjson.Parse(rawTool), "")
+		if !ok || !changed || len(raw) != 0 {
+			t.Fatalf("expected drop for %s; ok=%v changed=%v raw=%s", rawTool, ok, changed, string(raw))
+		}
+	}
+}
+
+func TestNormalizeXAIMCPTool_DerivesLabelFromHost(t *testing.T) {
+	tool := gjson.Parse(`{"type":"mcp","server_url":"https://mcp.example.com/v1"}`)
+	raw, changed, ok := normalizeXAITool(tool, "")
+	if !ok || !changed {
+		t.Fatalf("ok=%v changed=%v", ok, changed)
+	}
+	if got := gjson.GetBytes(raw, "server_label").String(); got != "mcp.example.com" {
+		t.Fatalf("server_label=%q want host-derived, raw=%s", got, string(raw))
+	}
+}
+
+func TestNormalizeXAITools_NativeMCPCountsAsOne(t *testing.T) {
+	// One remote mcp + many flattened mcp__* should keep native mcp and core tools under cap.
+	tools := `[{"type":"mcp","server_url":"https://mcp.deepwiki.com/mcp","server_label":"deepwiki"},{"type":"function","name":"shell","parameters":{"type":"object","properties":{}}}`
+	for i := 0; i < 200; i++ {
+		tools += fmt.Sprintf(`,{"type":"function","name":"mcp__local__tool_%d","parameters":{"type":"object","properties":{}}}`, i)
+	}
+	tools += `]`
+	body := []byte(`{"model":"grok-4.5","tools":` + tools + `}`)
+	out := capXAITools(normalizeXAITools(body))
+	n := gjson.GetBytes(out, "tools.#").Int()
+	if n > int64(xaiMaxTools) {
+		t.Fatalf("tools count=%d exceeds cap %d", n, xaiMaxTools)
+	}
+	foundMCP, foundShell := false, false
+	for _, tool := range gjson.GetBytes(out, "tools").Array() {
+		if tool.Get("type").String() == "mcp" && tool.Get("server_label").String() == "deepwiki" {
+			foundMCP = true
+		}
+		if tool.Get("name").String() == "shell" {
+			foundShell = true
+		}
+	}
+	if !foundMCP || !foundShell {
+		t.Fatalf("expected native mcp + shell kept; mcp=%v shell=%v sample=%s", foundMCP, foundShell, string(out)[:400])
+	}
+}
+
+func TestXAIIsPublicMCPServerURL(t *testing.T) {
+	if !xaiIsPublicMCPServerURL("https://mcp.deepwiki.com/mcp") {
+		t.Fatal("expected public https URL")
+	}
+	if xaiIsPublicMCPServerURL("http://127.0.0.1:9/mcp") {
+		t.Fatal("loopback should be private")
+	}
+	if xaiIsPublicMCPServerURL("not-a-url") {
+		t.Fatal("invalid URL should be private")
 	}
 }

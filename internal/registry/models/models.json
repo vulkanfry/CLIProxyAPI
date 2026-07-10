@@ -2429,6 +2429,18 @@
       "max_completion_tokens": 256000
     },
     {
+      "id": "grok-code-fast-1",
+      "object": "model",
+      "created": 1779321600,
+      "owned_by": "xai",
+      "type": "xai",
+      "display_name": "Grok Code Fast 1",
+      "name": "grok-code-fast-1",
+      "description": "xAI Grok Code Fast 1 (xai-sdk-python ChatModel) for coding workflows.",
+      "context_length": 256000,
+      "max_completion_tokens": 65536
+    },
+    {
       "id": "grok-4.5",
       "object": "model",
       "created": 1783526400,
@@ -2470,6 +2482,90 @@
       }
     },
     {
+      "id": "grok-4.3-latest",
+      "object": "model",
+      "created": 1775606400,
+      "owned_by": "xai",
+      "type": "xai",
+      "display_name": "Grok 4.3 Latest",
+      "name": "grok-4.3-latest",
+      "description": "xAI Grok 4.3 latest alias (xai-sdk-python ChatModel).",
+      "context_length": 1000000,
+      "max_completion_tokens": 65536,
+      "thinking": {
+        "zero_allowed": true,
+        "levels": [
+          "none",
+          "low",
+          "medium",
+          "high"
+        ]
+      }
+    },
+    {
+      "id": "grok-4.20",
+      "object": "model",
+      "created": 1773014400,
+      "owned_by": "xai",
+      "type": "xai",
+      "display_name": "Grok 4.20",
+      "name": "grok-4.20",
+      "description": "xAI Grok 4.20 reasoning model alias (xai-sdk-python ChatModel).",
+      "context_length": 2000000,
+      "max_completion_tokens": 65536,
+      "thinking": {
+        "zero_allowed": true,
+        "levels": [
+          "none",
+          "low",
+          "medium",
+          "high"
+        ]
+      }
+    },
+    {
+      "id": "grok-4.20-0309",
+      "object": "model",
+      "created": 1773014400,
+      "owned_by": "xai",
+      "type": "xai",
+      "display_name": "Grok 4.20 0309",
+      "name": "grok-4.20-0309",
+      "description": "xAI Grok 4.20 0309 alias (xai-sdk-python ChatModel).",
+      "context_length": 2000000,
+      "max_completion_tokens": 65536,
+      "thinking": {
+        "zero_allowed": true,
+        "levels": [
+          "none",
+          "low",
+          "medium",
+          "high"
+        ]
+      }
+    },
+    {
+      "id": "grok-4.20-reasoning-latest",
+      "object": "model",
+      "created": 1773014400,
+      "owned_by": "xai",
+      "type": "xai",
+      "display_name": "Grok 4.20 Reasoning Latest",
+      "name": "grok-4.20-reasoning-latest",
+      "description": "xAI Grok 4.20 reasoning latest alias (xai-sdk-python ChatModel).",
+      "context_length": 2000000,
+      "max_completion_tokens": 65536,
+      "thinking": {
+        "zero_allowed": true,
+        "levels": [
+          "none",
+          "low",
+          "medium",
+          "high"
+        ]
+      }
+    },
+    {
       "id": "grok-4.20-0309-reasoning",
       "object": "model",
       "created": 1773014400,
@@ -2478,6 +2574,39 @@
       "display_name": "Grok 4.20 0309 Reasoning",
       "name": "grok-4.20-0309-reasoning",
       "description": "xAI Grok 4.20 0309 reasoning model for the Responses API.",
+      "context_length": 2000000,
+      "max_completion_tokens": 65536,
+      "thinking": {
+        "zero_allowed": true,
+        "levels": [
+          "none",
+          "low",
+          "medium",
+          "high"
+        ]
+      }
+    },
+    {
+      "id": "grok-4.20-non-reasoning",
+      "object": "model",
+      "created": 1773014400,
+      "owned_by": "xai",
+      "type": "xai",
+      "display_name": "Grok 4.20 Non Reasoning",
+      "name": "grok-4.20-non-reasoning",
+      "description": "xAI Grok 4.20 non-reasoning alias (xai-sdk-python ChatModel).",
+      "context_length": 2000000,
+      "max_completion_tokens": 65536
+    },
+    {
+      "id": "grok-4.20-non-reasoning-latest",
+      "object": "model",
+      "created": 1773014400,
+      "owned_by": "xai",
+      "type": "xai",
+      "display_name": "Grok 4.20 Non Reasoning Latest",
+      "name": "grok-4.20-non-reasoning-latest",
+      "description": "xAI Grok 4.20 non-reasoning latest alias (xai-sdk-python ChatModel).",
       "context_length": 2000000,
       "max_completion_tokens": 65536
     },
@@ -2492,6 +2621,44 @@
       "description": "xAI Grok 4.20 0309 non-reasoning model for the Responses API.",
       "context_length": 2000000,
       "max_completion_tokens": 65536
+    },
+    {
+      "id": "grok-4.20-multi-agent",
+      "object": "model",
+      "created": 1773014400,
+      "owned_by": "xai",
+      "type": "xai",
+      "display_name": "Grok 4.20 Multi Agent",
+      "name": "grok-4.20-multi-agent",
+      "description": "xAI Grok 4.20 multi-agent alias (agent_count 4|16 via SDK).",
+      "context_length": 2000000,
+      "max_completion_tokens": 65536,
+      "thinking": {
+        "levels": [
+          "low",
+          "medium",
+          "high"
+        ]
+      }
+    },
+    {
+      "id": "grok-4.20-multi-agent-latest",
+      "object": "model",
+      "created": 1773014400,
+      "owned_by": "xai",
+      "type": "xai",
+      "display_name": "Grok 4.20 Multi Agent Latest",
+      "name": "grok-4.20-multi-agent-latest",
+      "description": "xAI Grok 4.20 multi-agent latest alias (xai-sdk-python ChatModel).",
+      "context_length": 2000000,
+      "max_completion_tokens": 65536,
+      "thinking": {
+        "levels": [
+          "low",
+          "medium",
+          "high"
+        ]
+      }
     },
     {
       "id": "grok-4.20-multi-agent-0309",
@@ -2511,6 +2678,30 @@
           "high"
         ]
       }
+    },
+    {
+      "id": "grok-4",
+      "object": "model",
+      "created": 1751328000,
+      "owned_by": "xai",
+      "type": "xai",
+      "display_name": "Grok 4",
+      "name": "grok-4",
+      "description": "xAI Grok 4 base alias (xai-sdk-python ChatModel).",
+      "context_length": 256000,
+      "max_completion_tokens": 65536
+    },
+    {
+      "id": "grok-4-latest",
+      "object": "model",
+      "created": 1751328000,
+      "owned_by": "xai",
+      "type": "xai",
+      "display_name": "Grok 4 Latest",
+      "name": "grok-4-latest",
+      "description": "xAI Grok 4 latest alias (xai-sdk-python ChatModel).",
+      "context_length": 256000,
+      "max_completion_tokens": 65536
     },
     {
       "id": "grok-3-mini",

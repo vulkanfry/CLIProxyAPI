@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/url"
 	"sort"
@@ -63,8 +64,12 @@ const (
 	xaiVideosPath               = "/videos"
 	xaiIdempotencyKeyMetaKey    = "idempotency_key"
 	xaiComposerModelPrefix      = "grok-composer-"
-	// xAI Responses rejects tool lists above this size (observed 400 "Maximum tools limit reached").
-	xaiMaxTools                 = 190
+	// Tool-count ceiling for xAI Responses.
+	// - HTTP Responses hard-fails around ~200 tools (400 "Maximum tools limit reached").
+	// - Official xai-sdk-python documents max 128 client-side function tools on Chat/gRPC.
+	// Cap at 128 so we stay under both the documented SDK limit and the HTTP ceiling.
+	// Prefer native type=mcp (one tool entry per remote server) over flattening MCP tools.
+	xaiMaxTools = 128
 )
 
 // XAIExecutor is a stateless executor for xAI Grok's Responses API.
@@ -1221,8 +1226,10 @@ func xaiAgentMessageToMessage(raw []byte) ([]byte, bool) {
 		prefix = fmt.Sprintf("[agent %s]\n", author)
 	}
 
-	// Build message content from text parts only; encrypted blobs are not xAI-compatible.
-	var parts []map[string]string
+	// xAI Message roles are only user/assistant/system/tool/function/developer
+	// (xai-sdk-python MessageRole). There is no agent_message type.
+	// Build plain message text; Codex collab encrypted_content is NOT Grok
+	// reasoning encryption and must not be forwarded as message.encrypted_content.
 	content := item.Get("content")
 	textBuf := strings.Builder{}
 	if prefix != "" {
@@ -1234,7 +1241,7 @@ func xaiAgentMessageToMessage(raw []byte) ([]byte, bool) {
 			case "input_text", "output_text", "text":
 				textBuf.WriteString(part.Get("text").String())
 			case "encrypted_content":
-				// Keep a short marker so the model knows private payload was present.
+				// Collab private payload — not usable by xAI; keep a marker only.
 				textBuf.WriteString("\n[encrypted agent payload omitted for provider compatibility]\n")
 			default:
 				if part.Get("text").Exists() {
@@ -1249,11 +1256,12 @@ func xaiAgentMessageToMessage(raw []byte) ([]byte, bool) {
 	if text == "" {
 		text = "[empty agent_message]"
 	}
-	parts = append(parts, map[string]string{"type": "input_text", "text": text})
 	out := map[string]any{
-		"type":    "message",
-		"role":    "user",
-		"content": parts,
+		"type": "message",
+		"role": "user",
+		"content": []map[string]string{
+			{"type": "input_text", "text": text},
+		},
 	}
 	encoded, err := json.Marshal(out)
 	if err != nil {
@@ -1696,7 +1704,9 @@ func normalizeXAITools(body []byte) []byte {
 
 // capXAITools enforces xAI's max tool count after namespace expansion.
 // Codex multi_agent_v2 sessions often inject dozens of MCP namespaces that
-// flatten past 200 tools and fail with: Maximum tools limit reached.
+// flatten past the limit and fail with: Maximum tools limit reached.
+// Prefer keep order: built-in server tools + core shell/function, then drop
+// low-priority flattened mcp__* tools first.
 func capXAITools(body []byte) []byte {
 	tools := gjson.GetBytes(body, "tools")
 	if !tools.Exists() || !tools.IsArray() {
@@ -1824,9 +1834,10 @@ func normalizeXAITool(tool gjson.Result, namespaceName string) ([]byte, bool, bo
 		}
 		return updated, true, true
 	case "mcp":
-		// Remote MCP tool configs often fail validation against private/internal URLs.
-		// Drop rather than hard-fail the whole request.
-		return nil, true, true
+		// Keep public remote MCP as a single native xAI tool entry (counts as 1
+		// toward the tools cap). Drop private/local URLs xAI cannot reach.
+		// See: https://docs.x.ai/developers/tools/remote-mcp and xai-sdk-python tools.mcp().
+		return normalizeXAIMCPTool(tool)
 	}
 	raw := []byte(tool.Raw)
 	if toolType == xaiCustomToolType {
@@ -1896,6 +1907,140 @@ func xaiFunctionParametersNeedSimplification(tool gjson.Result, namespaceName st
 		strings.EqualFold(strings.TrimSpace(tool.Get("name").String()), xaiAutomationUpdateToolName)
 }
 
+// normalizeXAIMCPTool projects an OpenAI/Codex type=mcp tool onto the shape
+// accepted by xAI Responses remote MCP. Unsupported OpenAI fields
+// (require_approval, connector_id) are dropped. Private/local server_url values
+// are dropped entirely — xAI cannot dial the client's localhost.
+//
+// Returns (raw, changed, ok) matching normalizeXAITool: empty raw means drop.
+func normalizeXAIMCPTool(tool gjson.Result) ([]byte, bool, bool) {
+	serverURL := firstNonEmptyTrimmed(
+		tool.Get("server_url").String(),
+		tool.Get("serverUrl").String(),
+	)
+	if !xaiIsPublicMCPServerURL(serverURL) {
+		log.Debugf("xai: dropping mcp tool with non-public server_url %q", serverURL)
+		return nil, true, true
+	}
+
+	label := firstNonEmptyTrimmed(
+		tool.Get("server_label").String(),
+		tool.Get("serverLabel").String(),
+	)
+	if label == "" {
+		if u, err := url.Parse(serverURL); err == nil {
+			label = strings.TrimSpace(u.Hostname())
+		}
+	}
+	if label == "" {
+		label = "mcp"
+	}
+
+	out := map[string]any{
+		"type":         "mcp",
+		"server_url":   serverURL,
+		"server_label": label,
+	}
+
+	if desc := firstNonEmptyTrimmed(
+		tool.Get("server_description").String(),
+		tool.Get("serverDescription").String(),
+	); desc != "" {
+		out["server_description"] = desc
+	}
+	if auth := strings.TrimSpace(tool.Get("authorization").String()); auth != "" {
+		out["authorization"] = auth
+	}
+
+	// OpenAI: allowed_tools; xAI SDK: allowed_tool_names. Responses HTTP uses allowed_tools.
+	allowed := tool.Get("allowed_tools")
+	if !allowed.Exists() {
+		allowed = tool.Get("allowed_tool_names")
+	}
+	if allowed.IsArray() {
+		names := make([]string, 0, len(allowed.Array()))
+		for _, item := range allowed.Array() {
+			if s := strings.TrimSpace(item.String()); s != "" {
+				names = append(names, s)
+			}
+		}
+		if len(names) > 0 {
+			out["allowed_tools"] = names
+		}
+	}
+
+	// OpenAI: headers; xAI SDK: extra_headers. Responses HTTP uses headers.
+	headers := tool.Get("headers")
+	if !headers.Exists() {
+		headers = tool.Get("extra_headers")
+	}
+	if headers.IsObject() {
+		mapped := make(map[string]string)
+		headers.ForEach(func(key, value gjson.Result) bool {
+			k := strings.TrimSpace(key.String())
+			if k == "" {
+				return true
+			}
+			mapped[k] = value.String()
+			return true
+		})
+		if len(mapped) > 0 {
+			out["headers"] = mapped
+		}
+	}
+
+	raw, err := json.Marshal(out)
+	if err != nil {
+		return nil, false, false
+	}
+	return raw, true, true
+}
+
+// xaiIsPublicMCPServerURL reports whether xAI's servers can reach this MCP URL.
+// Loopback, link-local, RFC1918, and .local/.internal hosts are rejected.
+func xaiIsPublicMCPServerURL(serverURL string) bool {
+	u, err := url.Parse(strings.TrimSpace(serverURL))
+	if err != nil {
+		return false
+	}
+	scheme := strings.ToLower(strings.TrimSpace(u.Scheme))
+	if scheme != "https" && scheme != "http" {
+		return false
+	}
+	host := strings.ToLower(strings.TrimSpace(u.Hostname()))
+	if host == "" {
+		return false
+	}
+	switch host {
+	case "localhost", "127.0.0.1", "::1", "0.0.0.0", "[::1]":
+		return false
+	}
+	if strings.HasSuffix(host, ".local") || strings.HasSuffix(host, ".internal") || strings.HasSuffix(host, ".localhost") {
+		return false
+	}
+	if ip := net.ParseIP(host); ip != nil {
+		if ip.IsLoopback() || ip.IsPrivate() || ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast() || ip.IsUnspecified() {
+			return false
+		}
+	}
+	return true
+}
+
+func firstNonEmptyTrimmed(values ...string) string {
+	for _, v := range values {
+		if s := strings.TrimSpace(v); s != "" {
+			return s
+		}
+	}
+	return ""
+}
+
+// sanitizeXAIInputEncryptedContent keeps only Grok-native encrypted_content on
+// reasoning/compaction items. Per xai-sdk-python, encrypted_content is:
+//   - opaque reasoning hydration (use_encrypted_content / ZDR continuity), or
+//   - compact_context() opaque blob for conversation compaction.
+// Codex/OpenAI-shaped encrypted payloads (agent_message blobs, GPT Fernet
+// shapes, nulls) are stripped so xAI does not 422 ModelInput.
 func sanitizeXAIInputEncryptedContent(body []byte) []byte {
 	input := gjson.GetBytes(body, "input")
 	if !input.Exists() || !input.IsArray() {
