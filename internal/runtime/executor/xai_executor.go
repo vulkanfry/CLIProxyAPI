@@ -1029,9 +1029,9 @@ func xaiMetadataString(meta map[string]any, key string) string {
 }
 
 
-// normalizeXAIInputCustomToolItems rewrites Codex custom tool history items into
-// function_call / function_call_output forms that xAI Responses accepts.
-// Without this, xAI returns 422: "data did not match any variant of untagged enum ModelInput".
+// normalizeXAIInputCustomToolItems rewrites Codex/OpenAI-hosted history items into
+// forms that xAI Responses accepts. Without this, xAI returns 422 ModelInput for
+// agent_message, shell_call, custom_tool_call, computer_call, etc.
 func normalizeXAIInputCustomToolItems(body []byte) []byte {
 	input := gjson.GetBytes(body, "input")
 	if !input.Exists() || !input.IsArray() {
@@ -1039,53 +1039,118 @@ func normalizeXAIInputCustomToolItems(body []byte) []byte {
 	}
 
 	changed := false
+	dropped := 0
 	items := make([]json.RawMessage, 0, len(input.Array()))
 	for _, item := range input.Array() {
-		raw := []byte(item.Raw)
-		switch strings.TrimSpace(item.Get("type").String()) {
-		case "custom_tool_call":
-			updated, errSet := sjson.SetBytes(raw, "type", "function_call")
+		itemType := strings.TrimSpace(item.Get("type").String())
+		// Chat-completions style entries without type: promote to message.
+		if itemType == "" && item.Get("role").Exists() {
+			raw := []byte(item.Raw)
+			updated, errSet := sjson.SetBytes(raw, "type", "message")
 			if errSet != nil {
 				return body
 			}
-			raw = updated
-			if !item.Get("arguments").Exists() {
-				args := xaiCustomToolInputAsFunctionArguments(item.Get("input"))
-				updated, errSet = sjson.SetBytes(raw, "arguments", args)
-				if errSet != nil {
-					return body
-				}
-				raw = updated
+			raw = normalizeXAIMessageContent(updated)
+			items = append(items, json.RawMessage(raw))
+			changed = true
+			continue
+		}
+
+		switch itemType {
+		case "message":
+			raw := normalizeXAIMessageContent([]byte(item.Raw))
+			if string(raw) != item.Raw {
+				changed = true
 			}
-			// Drop custom-only field so upstream ModelInput stays strict.
-			if item.Get("input").Exists() {
-				updated, errDel := sjson.DeleteBytes(raw, "input")
-				if errDel != nil {
-					return body
-				}
-				raw = updated
+			items = append(items, json.RawMessage(raw))
+		case "agent_message":
+			// Multi-agent collab messages. xAI has no agent_message variant.
+			raw, ok := xaiAgentMessageToMessage([]byte(item.Raw))
+			if !ok {
+				dropped++
+				changed = true
+				continue
 			}
+			items = append(items, json.RawMessage(raw))
+			changed = true
+		case "custom_tool_call":
+			raw, ok := xaiConvertToFunctionCall([]byte(item.Raw), item, "custom")
+			if !ok {
+				return body
+			}
+			items = append(items, json.RawMessage(raw))
 			changed = true
 		case "custom_tool_call_output":
-			updated, errSet := sjson.SetBytes(raw, "type", "function_call_output")
-			if errSet != nil {
+			raw, ok := xaiConvertToFunctionCallOutput([]byte(item.Raw), item)
+			if !ok {
 				return body
 			}
-			raw = updated
-			out := item.Get("output")
-			if out.IsArray() || out.IsObject() {
-				updated, errSet = sjson.SetBytes(raw, "output", xaiCustomToolOutputAsString(out))
+			items = append(items, json.RawMessage(raw))
+			changed = true
+		case "shell_call", "local_shell_call", "computer_call", "web_search_call", "file_search_call", "code_interpreter_call", "image_generation_call", "code_execution_call":
+			raw, ok := xaiHostedCallToFunctionCall([]byte(item.Raw), item, itemType)
+			if !ok {
+				dropped++
+				changed = true
+				continue
+			}
+			items = append(items, json.RawMessage(raw))
+			changed = true
+		case "shell_call_output", "local_shell_call_output", "computer_call_output", "code_interpreter_call_output", "code_execution_call_output":
+			raw, ok := xaiConvertToFunctionCallOutput([]byte(item.Raw), item)
+			if !ok {
+				return body
+			}
+			items = append(items, json.RawMessage(raw))
+			changed = true
+		case "function_call":
+			raw := []byte(item.Raw)
+			// xAI rejects null arguments.
+			if !item.Get("arguments").Exists() || item.Get("arguments").Type == gjson.Null {
+				updated, errSet := sjson.SetBytes(raw, "arguments", "{}")
 				if errSet != nil {
 					return body
 				}
 				raw = updated
+				changed = true
 			}
+			items = append(items, json.RawMessage(raw))
+		case "function_call_output":
+			raw := []byte(item.Raw)
+			out := item.Get("output")
+			if out.IsArray() || out.IsObject() || out.Type == gjson.Null {
+				updated, errSet := sjson.SetBytes(raw, "output", xaiCustomToolOutputAsString(out))
+				if errSet != nil {
+					return body
+				}
+				raw = updated
+				changed = true
+			}
+			items = append(items, json.RawMessage(raw))
+		case "item_reference":
+			// Cannot resolve opaque refs for xAI; drop rather than 422.
+			dropped++
 			changed = true
+			continue
+		case "reasoning", "compaction", "mcp_call", "mcp_list_tools", "mcp_approval_request", "mcp_approval_response":
+			items = append(items, json.RawMessage([]byte(item.Raw)))
+		default:
+			// Unknown types risk 422 ModelInput — drop with trace.
+			if itemType != "" {
+				log.Debugf("xai: dropping unsupported input item type %q to avoid ModelInput 422", itemType)
+				dropped++
+				changed = true
+				continue
+			}
+			items = append(items, json.RawMessage([]byte(item.Raw)))
 		}
-		items = append(items, json.RawMessage(raw))
 	}
 	if !changed {
 		return body
+	}
+	if len(items) == 0 {
+		// Never leave empty input; inject a tiny user message.
+		items = append(items, json.RawMessage(`{"type":"message","role":"user","content":[{"type":"input_text","text":"(history items were normalized/dropped for xAI compatibility)"}]}`))
 	}
 
 	var buf bytes.Buffer
@@ -1101,8 +1166,274 @@ func normalizeXAIInputCustomToolItems(body []byte) []byte {
 	if err != nil {
 		return body
 	}
-	log.Debugf("xai: normalized Codex custom_tool_call* input items for upstream Responses API")
+	if dropped > 0 {
+		log.Debugf("xai: normalized Codex input items for upstream (dropped=%d kept=%d)", dropped, len(items))
+	} else {
+		log.Debugf("xai: normalized Codex input items for upstream Responses API")
+	}
 	return updated
+}
+
+func xaiAgentMessageToMessage(raw []byte) ([]byte, bool) {
+	item := gjson.ParseBytes(raw)
+	author := strings.TrimSpace(item.Get("author").String())
+	recipient := strings.TrimSpace(item.Get("recipient").String())
+	prefix := ""
+	switch {
+	case author != "" && recipient != "":
+		prefix = fmt.Sprintf("[agent %s -> %s]\n", author, recipient)
+	case author != "":
+		prefix = fmt.Sprintf("[agent %s]\n", author)
+	}
+
+	// Build message content from text parts only; encrypted blobs are not xAI-compatible.
+	var parts []map[string]string
+	content := item.Get("content")
+	textBuf := strings.Builder{}
+	if prefix != "" {
+		textBuf.WriteString(prefix)
+	}
+	if content.IsArray() {
+		for _, part := range content.Array() {
+			switch strings.TrimSpace(part.Get("type").String()) {
+			case "input_text", "output_text", "text":
+				textBuf.WriteString(part.Get("text").String())
+			case "encrypted_content":
+				// Keep a short marker so the model knows private payload was present.
+				textBuf.WriteString("\n[encrypted agent payload omitted for provider compatibility]\n")
+			default:
+				if part.Get("text").Exists() {
+					textBuf.WriteString(part.Get("text").String())
+				}
+			}
+		}
+	} else if content.Type == gjson.String {
+		textBuf.WriteString(content.String())
+	}
+	text := strings.TrimSpace(textBuf.String())
+	if text == "" {
+		text = "[empty agent_message]"
+	}
+	parts = append(parts, map[string]string{"type": "input_text", "text": text})
+	out := map[string]any{
+		"type":    "message",
+		"role":    "user",
+		"content": parts,
+	}
+	encoded, err := json.Marshal(out)
+	if err != nil {
+		return nil, false
+	}
+	return encoded, true
+}
+
+func normalizeXAIMessageContent(raw []byte) []byte {
+	content := gjson.GetBytes(raw, "content")
+	if !content.IsArray() {
+		// String content is accepted by some paths; leave as-is.
+		return raw
+	}
+	changed := false
+	var parts []json.RawMessage
+	for _, part := range content.Array() {
+		pType := strings.TrimSpace(part.Get("type").String())
+		switch pType {
+		case "output_text":
+			// xAI prefers input_text in user/developer history content.
+			updated, errSet := sjson.SetBytes([]byte(part.Raw), "type", "input_text")
+			if errSet != nil {
+				parts = append(parts, json.RawMessage([]byte(part.Raw)))
+				continue
+			}
+			parts = append(parts, json.RawMessage(updated))
+			changed = true
+		case "encrypted_content":
+			// Not a valid message content part for xAI — drop.
+			changed = true
+			continue
+		default:
+			parts = append(parts, json.RawMessage([]byte(part.Raw)))
+		}
+	}
+	if !changed {
+		return raw
+	}
+	if len(parts) == 0 {
+		parts = append(parts, json.RawMessage(`{"type":"input_text","text":"[content sanitized]"}`))
+	}
+	var buf bytes.Buffer
+	buf.WriteByte('[')
+	for i, part := range parts {
+		if i > 0 {
+			buf.WriteByte(',')
+		}
+		buf.Write(part)
+	}
+	buf.WriteByte(']')
+	updated, err := sjson.SetRawBytes(raw, "content", buf.Bytes())
+	if err != nil {
+		return raw
+	}
+	return updated
+}
+
+func xaiConvertToFunctionCall(raw []byte, item gjson.Result, source string) ([]byte, bool) {
+	updated, errSet := sjson.SetBytes(raw, "type", "function_call")
+	if errSet != nil {
+		return nil, false
+	}
+	raw = updated
+	if !item.Get("name").Exists() || strings.TrimSpace(item.Get("name").String()) == "" {
+		name := "tool"
+		if source != "" {
+			name = source
+		}
+		updated, errSet = sjson.SetBytes(raw, "name", name)
+		if errSet != nil {
+			return nil, false
+		}
+		raw = updated
+	}
+	if !item.Get("arguments").Exists() || item.Get("arguments").Type == gjson.Null {
+		args := xaiCustomToolInputAsFunctionArguments(item.Get("input"))
+		if source != "custom" && item.Get("action").Exists() {
+			args = xaiJSONArgumentsFromResult(item.Get("action"))
+		} else if source != "custom" && item.Get("code").Exists() {
+			args = xaiJSONArgumentsFromMap(map[string]any{"code": item.Get("code").Value()})
+		} else if source != "custom" && item.Get("queries").Exists() {
+			args = xaiJSONArgumentsFromMap(map[string]any{"queries": item.Get("queries").Value()})
+		}
+		updated, errSet = sjson.SetBytes(raw, "arguments", args)
+		if errSet != nil {
+			return nil, false
+		}
+		raw = updated
+	}
+	// Drop custom-only fields that can confuse strict parsers.
+	for _, key := range []string{"input", "action", "code", "queries", "server_label", "output"} {
+		if item.Get(key).Exists() {
+			updated, errDel := sjson.DeleteBytes(raw, key)
+			if errDel != nil {
+				return nil, false
+			}
+			raw = updated
+		}
+	}
+	return raw, true
+}
+
+func xaiHostedCallToFunctionCall(raw []byte, item gjson.Result, itemType string) ([]byte, bool) {
+	name := strings.TrimSuffix(itemType, "_call")
+	if name == itemType {
+		name = "hosted_tool"
+	}
+	// local_shell_call -> local_shell, etc.
+	updated, errSet := sjson.SetBytes(raw, "type", "function_call")
+	if errSet != nil {
+		return nil, false
+	}
+	raw = updated
+	if !item.Get("name").Exists() || strings.TrimSpace(item.Get("name").String()) == "" {
+		updated, errSet = sjson.SetBytes(raw, "name", name)
+		if errSet != nil {
+			return nil, false
+		}
+		raw = updated
+	}
+	if !item.Get("arguments").Exists() || item.Get("arguments").Type == gjson.Null {
+		var args string
+		switch {
+		case item.Get("action").Exists():
+			args = xaiJSONArgumentsFromResult(item.Get("action"))
+		case item.Get("code").Exists():
+			args = xaiJSONArgumentsFromMap(map[string]any{"code": item.Get("code").Value()})
+		case item.Get("queries").Exists():
+			args = xaiJSONArgumentsFromMap(map[string]any{"queries": item.Get("queries").Value()})
+		case item.Get("input").Exists():
+			args = xaiCustomToolInputAsFunctionArguments(item.Get("input"))
+		default:
+			args = "{}"
+		}
+		updated, errSet = sjson.SetBytes(raw, "arguments", args)
+		if errSet != nil {
+			return nil, false
+		}
+		raw = updated
+	}
+	for _, key := range []string{"action", "code", "queries", "input", "output", "result", "status"} {
+		// keep status if useful? xAI function_call may not want status — drop.
+		if item.Get(key).Exists() {
+			updated, errDel := sjson.DeleteBytes(raw, key)
+			if errDel != nil {
+				return nil, false
+			}
+			raw = updated
+		}
+	}
+	return raw, true
+}
+
+func xaiConvertToFunctionCallOutput(raw []byte, item gjson.Result) ([]byte, bool) {
+	updated, errSet := sjson.SetBytes(raw, "type", "function_call_output")
+	if errSet != nil {
+		return nil, false
+	}
+	raw = updated
+	out := item.Get("output")
+	if !out.Exists() {
+		// Some hosted tools put payload under result.
+		if item.Get("result").Exists() {
+			out = item.Get("result")
+		}
+	}
+	if out.IsArray() || out.IsObject() || out.Type == gjson.Null || !out.Exists() {
+		updated, errSet = sjson.SetBytes(raw, "output", xaiCustomToolOutputAsString(out))
+		if errSet != nil {
+			return nil, false
+		}
+		raw = updated
+	}
+	if item.Get("result").Exists() {
+		updated, errDel := sjson.DeleteBytes(raw, "result")
+		if errDel != nil {
+			return nil, false
+		}
+		raw = updated
+	}
+	return raw, true
+}
+
+func xaiJSONArgumentsFromResult(value gjson.Result) string {
+	if !value.Exists() {
+		return "{}"
+	}
+	if value.Type == gjson.String {
+		// If already JSON object string, keep; else wrap.
+		s := value.String()
+		if json.Valid([]byte(s)) && (strings.HasPrefix(strings.TrimSpace(s), "{") || strings.HasPrefix(strings.TrimSpace(s), "[")) {
+			return s
+		}
+		return xaiJSONArgumentsFromMap(map[string]any{"input": s})
+	}
+	if value.Type == gjson.JSON {
+		// Ensure object-ish payload.
+		raw := strings.TrimSpace(value.Raw)
+		if strings.HasPrefix(raw, "{") || strings.HasPrefix(raw, "[") {
+			if strings.HasPrefix(raw, "[") {
+				return xaiJSONArgumentsFromMap(map[string]any{"items": value.Value()})
+			}
+			return raw
+		}
+	}
+	return xaiJSONArgumentsFromMap(map[string]any{"value": value.Value()})
+}
+
+func xaiJSONArgumentsFromMap(v map[string]any) string {
+	b, err := json.Marshal(v)
+	if err != nil {
+		return "{}"
+	}
+	return string(b)
 }
 
 func xaiCustomToolInputAsFunctionArguments(input gjson.Result) string {
@@ -1118,7 +1449,7 @@ func xaiCustomToolInputAsFunctionArguments(input gjson.Result) string {
 }
 
 func xaiCustomToolOutputAsString(output gjson.Result) string {
-	if !output.Exists() {
+	if !output.Exists() || output.Type == gjson.Null {
 		return ""
 	}
 	if output.Type == gjson.String {
@@ -1130,6 +1461,8 @@ func xaiCustomToolOutputAsString(output gjson.Result) string {
 			switch strings.TrimSpace(part.Get("type").String()) {
 			case "input_text", "output_text", "text":
 				b.WriteString(part.Get("text").String())
+			case "computer_screenshot", "input_image":
+				b.WriteString("[image omitted]")
 			default:
 				if part.Get("text").Exists() {
 					b.WriteString(part.Get("text").String())
@@ -1239,7 +1572,9 @@ func normalizeXAIToolChoiceForTools(body []byte) []byte {
 func normalizeXAITool(tool gjson.Result, namespaceName string) ([]byte, bool, bool) {
 	toolType := tool.Get("type").String()
 	changed := false
-	if toolType == xaiToolSearchType || toolType == xaiImageGenerationToolType {
+	// Drop tool types xAI rejects (unknown variant in tools enum).
+	switch toolType {
+	case xaiToolSearchType, xaiImageGenerationToolType, "computer_use_preview", "computer", "computer_use":
 		return nil, true, true
 	}
 	raw := []byte(tool.Raw)

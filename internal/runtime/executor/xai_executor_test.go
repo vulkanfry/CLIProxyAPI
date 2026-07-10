@@ -1624,3 +1624,78 @@ func TestNormalizeXAITool_CustomProjectsInputParameter(t *testing.T) {
 		t.Fatalf("parameters missing input string field: %s", string(raw))
 	}
 }
+
+func TestNormalizeXAIInputAgentMessage(t *testing.T) {
+	body := []byte(`{
+		"model":"grok-4.5",
+		"input":[
+			{"type":"agent_message","author":"/root","recipient":"/root/worker","content":[
+				{"type":"input_text","text":"Message Type: NEW_TASK\n"},
+				{"type":"encrypted_content","encrypted_content":"gAAAAA-secret"}
+			]},
+			{"type":"message","role":"user","content":[{"type":"input_text","text":"continue"}]}
+		]
+	}`)
+	out := normalizeXAIInputCustomToolItems(body)
+	if got := gjson.GetBytes(out, "input.#").Int(); got != 2 {
+		t.Fatalf("input len=%d want 2 body=%s", got, string(out))
+	}
+	if got := gjson.GetBytes(out, "input.0.type").String(); got != "message" {
+		t.Fatalf("input.0.type=%q want message body=%s", got, string(out))
+	}
+	if got := gjson.GetBytes(out, "input.0.role").String(); got != "user" {
+		t.Fatalf("input.0.role=%q want user", got)
+	}
+	text := gjson.GetBytes(out, "input.0.content.0.text").String()
+	if !strings.Contains(text, "NEW_TASK") || !strings.Contains(text, "agent /root") {
+		t.Fatalf("unexpected agent text: %q", text)
+	}
+	if strings.Contains(text, "gAAAAA-secret") {
+		t.Fatalf("encrypted payload should not leak into text: %q", text)
+	}
+}
+
+func TestNormalizeXAIInputShellCallAndNullArgs(t *testing.T) {
+	body := []byte(`{
+		"model":"grok-4.5",
+		"input":[
+			{"type":"message","role":"user","content":[{"type":"input_text","text":"hi"}]},
+			{"type":"shell_call","call_id":"s1","action":{"command":["echo","hi"]},"status":"completed"},
+			{"type":"shell_call_output","call_id":"s1","output":"hi"},
+			{"type":"function_call","call_id":"f1","name":"x","arguments":null},
+			{"type":"item_reference","id":"msg_fake"}
+		]
+	}`)
+	out := normalizeXAIInputCustomToolItems(body)
+	types := []string{}
+	for _, item := range gjson.GetBytes(out, "input").Array() {
+		types = append(types, item.Get("type").String())
+	}
+	// item_reference dropped; others converted
+	wantPrefix := []string{"message", "function_call", "function_call_output", "function_call"}
+	if len(types) != len(wantPrefix) {
+		t.Fatalf("types=%v want %v body=%s", types, wantPrefix, string(out))
+	}
+	for i := range wantPrefix {
+		if types[i] != wantPrefix[i] {
+			t.Fatalf("types=%v want %v", types, wantPrefix)
+		}
+	}
+	if got := gjson.GetBytes(out, "input.3.arguments").String(); got != "{}" {
+		t.Fatalf("null arguments became %q", got)
+	}
+	if got := gjson.GetBytes(out, "input.1.name").String(); got != "shell" {
+		t.Fatalf("shell_call name=%q", got)
+	}
+}
+
+func TestNormalizeXAITool_DropsComputerUsePreview(t *testing.T) {
+	tool := gjson.Parse(`{"type":"computer_use_preview","display_width":100,"display_height":100,"environment":"browser"}`)
+	raw, changed, ok := normalizeXAITool(tool, "")
+	if !ok {
+		t.Fatal("normalize failed")
+	}
+	if !changed || len(raw) != 0 {
+		t.Fatalf("computer_use_preview should be dropped, raw=%s changed=%v", string(raw), changed)
+	}
+}
