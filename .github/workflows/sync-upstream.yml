@@ -18,11 +18,11 @@ jobs:
   sync:
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout fork default
+      - name: Checkout fork
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
-          # Need a token that can push to the fork.
+          ref: main-xai-codex
           token: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Configure git
@@ -105,14 +105,23 @@ jobs:
                 body: body,
               });
             } else {
-              await github.rest.issues.create({
-                owner: context.repo.owner,
-                repo: context.repo.owner === context.repo.owner ? context.repo.owner : context.repo.owner,
-                repo: context.repo.repo,
-                title,
-                body,
-                labels: ['upstream-sync'],
-              });
+              // label may not exist yet; create issue without hard dependency on labels
+              try {
+                await github.rest.issues.create({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  title,
+                  body,
+                  labels: ['upstream-sync'],
+                });
+              } catch (e) {
+                await github.rest.issues.create({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  title,
+                  body,
+                });
+              }
             }
 
       - name: Summary
