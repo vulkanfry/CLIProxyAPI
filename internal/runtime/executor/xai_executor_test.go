@@ -2,6 +2,7 @@ package executor
 
 import (
 	"bytes"
+	"fmt"
 	"context"
 	"crypto/sha256"
 	"encoding/base64"
@@ -1697,5 +1698,33 @@ func TestNormalizeXAITool_DropsComputerUsePreview(t *testing.T) {
 	}
 	if !changed || len(raw) != 0 {
 		t.Fatalf("computer_use_preview should be dropped, raw=%s changed=%v", string(raw), changed)
+	}
+}
+
+func TestCapXAITools_PrioritizesCoreAndDropsExcess(t *testing.T) {
+	// Build >200 tools: one web_search, one core function, many mcp tools.
+	tools := `[{"type":"web_search"},{"type":"function","name":"shell","parameters":{"type":"object","properties":{}}}`
+	for i := 0; i < 250; i++ {
+		tools += fmt.Sprintf(`,{"type":"function","name":"mcp__grafana__tool_%d","parameters":{"type":"object","properties":{}}}`, i)
+	}
+	tools += `]`
+	body := []byte(`{"model":"grok-4.5","tools":` + tools + `,"input":"hi"}`)
+	out := capXAITools(body)
+	n := gjson.GetBytes(out, "tools.#").Int()
+	if n != int64(xaiMaxTools) {
+		t.Fatalf("tools count=%d want %d", n, xaiMaxTools)
+	}
+	// web_search and shell should remain
+	foundWeb, foundShell := false, false
+	for _, tool := range gjson.GetBytes(out, "tools").Array() {
+		if tool.Get("type").String() == "web_search" {
+			foundWeb = true
+		}
+		if tool.Get("name").String() == "shell" {
+			foundShell = true
+		}
+	}
+	if !foundWeb || !foundShell {
+		t.Fatalf("core tools missing web=%v shell=%v body sample=%s", foundWeb, foundShell, string(out)[:300])
 	}
 }

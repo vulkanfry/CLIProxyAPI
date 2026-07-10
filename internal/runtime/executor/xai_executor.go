@@ -63,6 +63,8 @@ const (
 	xaiVideosPath               = "/videos"
 	xaiIdempotencyKeyMetaKey    = "idempotency_key"
 	xaiComposerModelPrefix      = "grok-composer-"
+	// xAI Responses rejects tool lists above this size (observed 400 "Maximum tools limit reached").
+	xaiMaxTools                 = 200
 )
 
 // XAIExecutor is a stateless executor for xAI Grok's Responses API.
@@ -848,6 +850,7 @@ func (e *XAIExecutor) prepareResponsesRequestTo(ctx context.Context, req cliprox
 	body, _ = sjson.DeleteBytes(body, "safety_identifier")
 	body, _ = sjson.DeleteBytes(body, "stream_options")
 	body = normalizeXAITools(body)
+	body = capXAITools(body)
 	body = normalizeXAIToolChoiceForTools(body)
 	var replayScope xaiReasoningReplayScope
 	body, replayScope, err = applyXAIReasoningReplayCacheRequired(ctx, from, req, opts, body)
@@ -1544,6 +1547,76 @@ func normalizeXAITools(body []byte) []byte {
 	if errSet != nil {
 		return body
 	}
+	return updated
+}
+
+
+// capXAITools enforces xAI's max tool count after namespace expansion.
+// Codex multi_agent_v2 sessions often inject dozens of MCP namespaces that
+// flatten past 200 tools and fail with: Maximum tools limit reached.
+func capXAITools(body []byte) []byte {
+	tools := gjson.GetBytes(body, "tools")
+	if !tools.Exists() || !tools.IsArray() {
+		return body
+	}
+	arr := tools.Array()
+	if len(arr) <= xaiMaxTools {
+		return body
+	}
+
+	type scoredTool struct {
+		score int
+		idx   int
+		raw   []byte
+	}
+	scored := make([]scoredTool, 0, len(arr))
+	for i, tool := range arr {
+		name := strings.ToLower(strings.TrimSpace(tool.Get("name").String()))
+		typ := strings.TrimSpace(tool.Get("type").String())
+		score := 50
+		switch typ {
+		case xaiWebSearchToolType, "x_search", "shell", "mcp":
+			score = 0
+		case xaiFunctionToolType, xaiCustomToolType:
+			switch {
+			case strings.HasPrefix(name, "mcp__") || strings.Contains(name, "mcp__"):
+				score = 180
+			case strings.Contains(name, "grafana") || strings.Contains(name, "github") || strings.Contains(name, "slack"):
+				score = 160
+			case name == "shell" || name == "exec" || name == "apply_patch" || name == "update_plan" || name == "web_search":
+				score = 5
+			default:
+				score = 40
+			}
+		default:
+			score = 100
+		}
+		scored = append(scored, scoredTool{score: score, idx: i, raw: []byte(tool.Raw)})
+	}
+
+	sort.SliceStable(scored, func(i, j int) bool {
+		if scored[i].score != scored[j].score {
+			return scored[i].score < scored[j].score
+		}
+		return scored[i].idx < scored[j].idx
+	})
+	kept := scored[:xaiMaxTools]
+	// Preserve original relative order among kept tools for prompt stability.
+	sort.SliceStable(kept, func(i, j int) bool { return kept[i].idx < kept[j].idx })
+
+	filtered := []byte(`[]`)
+	for _, item := range kept {
+		updated, errSet := sjson.SetRawBytes(filtered, "-1", item.raw)
+		if errSet != nil {
+			return body
+		}
+		filtered = updated
+	}
+	updated, errSet := sjson.SetRawBytes(body, "tools", filtered)
+	if errSet != nil {
+		return body
+	}
+	log.Debugf("xai: capped tools from %d to %d for Responses API limit", len(arr), xaiMaxTools)
 	return updated
 }
 
