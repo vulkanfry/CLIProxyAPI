@@ -64,7 +64,7 @@ const (
 	xaiIdempotencyKeyMetaKey    = "idempotency_key"
 	xaiComposerModelPrefix      = "grok-composer-"
 	// xAI Responses rejects tool lists above this size (observed 400 "Maximum tools limit reached").
-	xaiMaxTools                 = 200
+	xaiMaxTools                 = 190
 )
 
 // XAIExecutor is a stateless executor for xAI Grok's Responses API.
@@ -862,6 +862,7 @@ func (e *XAIExecutor) prepareResponsesRequestTo(ctx context.Context, req cliprox
 	body = normalizeXAIInputCustomToolItems(body)
 	body = normalizeCodexInstructions(body)
 	body = sanitizeXAIResponsesBody(body, baseModel)
+	body = capXAITools(body)
 
 	sessionID, errSession := xaiResolveComposerSessionID(ctx, req, opts, baseModel)
 	if errSession != nil {
@@ -1567,7 +1568,7 @@ func capXAITools(body []byte) []byte {
 	type scoredTool struct {
 		score int
 		idx   int
-		raw   []byte
+		raw   json.RawMessage
 	}
 	scored := make([]scoredTool, 0, len(arr))
 	for i, tool := range arr {
@@ -1591,7 +1592,7 @@ func capXAITools(body []byte) []byte {
 		default:
 			score = 100
 		}
-		scored = append(scored, scoredTool{score: score, idx: i, raw: []byte(tool.Raw)})
+		scored = append(scored, scoredTool{score: score, idx: i, raw: json.RawMessage(tool.Raw)})
 	}
 
 	sort.SliceStable(scored, func(i, j int) bool {
@@ -1604,26 +1605,38 @@ func capXAITools(body []byte) []byte {
 	// Preserve original relative order among kept tools for prompt stability.
 	sort.SliceStable(kept, func(i, j int) bool { return kept[i].idx < kept[j].idx })
 
-	filtered := []byte(`[]`)
+	rawList := make([]json.RawMessage, 0, len(kept))
 	for _, item := range kept {
-		updated, errSet := sjson.SetRawBytes(filtered, "-1", item.raw)
-		if errSet != nil {
-			return body
-		}
-		filtered = updated
+		rawList = append(rawList, item.raw)
 	}
-	updated, errSet := sjson.SetRawBytes(body, "tools", filtered)
+	encoded, err := json.Marshal(rawList)
+	if err != nil {
+		return body
+	}
+	updated, errSet := sjson.SetRawBytes(body, "tools", encoded)
 	if errSet != nil {
 		return body
 	}
-	log.Debugf("xai: capped tools from %d to %d for Responses API limit", len(arr), xaiMaxTools)
+	// Defensive re-check: never leave more than max tools.
+	if n := len(gjson.GetBytes(updated, "tools").Array()); n > xaiMaxTools {
+		log.Warnf("xai: tools still %d after cap attempt; truncating hard", n)
+		hard := rawList
+		if len(hard) > xaiMaxTools {
+			hard = hard[:xaiMaxTools]
+		}
+		encoded, err = json.Marshal(hard)
+		if err != nil {
+			return body
+		}
+		updated, errSet = sjson.SetRawBytes(body, "tools", encoded)
+		if errSet != nil {
+			return body
+		}
+	}
+	log.Infof("xai: capped tools from %d to %d for Responses API limit", len(arr), len(gjson.GetBytes(updated, "tools").Array()))
 	return updated
 }
 
-// normalizeXAIToolChoiceForTools drops tool_choice and parallel_tool_calls
-// when tools are absent or empty (including after normalizeXAITools filtering).
-// xAI rejects payloads that include tool_choice without any tools defined.
-// Existence checks avoid unnecessary sjson parse/copy passes.
 func normalizeXAIToolChoiceForTools(body []byte) []byte {
 	tools := gjson.GetBytes(body, "tools")
 	hasTools := tools.Exists() && tools.IsArray() && len(tools.Array()) > 0
