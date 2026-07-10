@@ -31,6 +31,30 @@ func TestWithXAIBuiltinsIncludesVideoPreviewModel(t *testing.T) {
 	t.Fatalf("expected xAI builtin model %s", xaiBuiltinVideo15PreviewModelID)
 }
 
+func TestWithXAIBuiltinsIncludesGrokBuildModels(t *testing.T) {
+	models := WithXAIBuiltins(nil)
+	want := map[string]bool{
+		xaiBuiltinBuildModelID:        false,
+		xaiBuiltinBuild01ModelID:      false,
+		xaiBuiltinBuildLatestModelID:  false,
+		xaiBuiltinBuildPlanModelID:    false,
+		xaiBuiltinBuildConciseModelID: false,
+	}
+	for _, model := range models {
+		if model == nil {
+			continue
+		}
+		if _, ok := want[model.ID]; ok {
+			want[model.ID] = true
+		}
+	}
+	for id, found := range want {
+		if !found {
+			t.Fatalf("expected xAI builtin model %s", id)
+		}
+	}
+}
+
 func TestAntigravityWebSearchModelForRequiresRequestedModelCapability(t *testing.T) {
 	registryRef := GetGlobalRegistry()
 	registryRef.RegisterClient("test-antigravity-websearch-route", "antigravity", []*ModelInfo{

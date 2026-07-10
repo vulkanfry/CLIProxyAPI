@@ -13,6 +13,13 @@ const (
 	xaiBuiltinImageQualityModelID   = "grok-imagine-image-quality"
 	xaiBuiltinVideoModelID          = "grok-imagine-video"
 	xaiBuiltinVideo15PreviewModelID = "grok-imagine-video-1.5-preview"
+	// Grok Build coding models (official CLI default + aliases). Kept as
+	// builtins so remote models.json refresh cannot drop them.
+	xaiBuiltinBuildModelID       = "grok-build"
+	xaiBuiltinBuild01ModelID     = "grok-build-0.1"
+	xaiBuiltinBuildLatestModelID = "grok-build-latest"
+	xaiBuiltinBuildPlanModelID   = "grok-build-plan"
+	xaiBuiltinBuildConciseModelID = "grok-build-concise"
 )
 
 // staticModelsJSON mirrors the top-level structure of models.json.
@@ -117,10 +124,20 @@ func WithCodexBuiltins(models []*ModelInfo) []*ModelInfo {
 	return upsertModelInfos(models, codexBuiltinImage15ModelInfo(), codexBuiltinImageModelInfo())
 }
 
-// WithXAIBuiltins injects hard-coded xAI image/video model definitions that should
-// not depend on remote models.json updates.
+// WithXAIBuiltins injects hard-coded xAI image/video + Grok Build model
+// definitions that should not depend on remote models.json updates.
 func WithXAIBuiltins(models []*ModelInfo) []*ModelInfo {
-	return upsertModelInfos(models, xaiBuiltinImageModelInfo(), xaiBuiltinImageQualityModelInfo(), xaiBuiltinVideoModelInfo(), xaiBuiltinVideo15PreviewModelInfo())
+	return upsertModelInfos(models,
+		xaiBuiltinImageModelInfo(),
+		xaiBuiltinImageQualityModelInfo(),
+		xaiBuiltinVideoModelInfo(),
+		xaiBuiltinVideo15PreviewModelInfo(),
+		xaiBuiltinBuildModelInfo(),
+		xaiBuiltinBuild01ModelInfo(),
+		xaiBuiltinBuildLatestModelInfo(),
+		xaiBuiltinBuildAliasModelInfo(xaiBuiltinBuildPlanModelID, "Grok Build Plan", "Grok Build plan-mode persona alias (upstream: grok-build)."),
+		xaiBuiltinBuildAliasModelInfo(xaiBuiltinBuildConciseModelID, "Grok Build Concise", "Grok Build concise persona alias (upstream: grok-build)."),
+	)
 }
 
 func normalizeAntigravityCapabilityModelID(modelID string) string {
@@ -204,6 +221,59 @@ func xaiBuiltinVideo15PreviewModelInfo() *ModelInfo {
 		DisplayName: "Grok Imagine Video 1.5 Preview",
 		Name:        xaiBuiltinVideo15PreviewModelID,
 		Description: "xAI Grok preview video generation model.",
+	}
+}
+
+func xaiBuiltinBuildModelInfo() *ModelInfo {
+	return &ModelInfo{
+		ID:                   xaiBuiltinBuildModelID,
+		Object:               "model",
+		Created:              1779321600,
+		OwnedBy:              "xai",
+		Type:                 "xai",
+		DisplayName:          "Grok Build",
+		Name:                 xaiBuiltinBuildModelID,
+		Description:          "Grok Build default coding model (official Grok Build CLI / cli-chat-proxy).",
+		ContextLength:        256000,
+		MaxCompletionTokens:  256000,
+	}
+}
+
+func xaiBuiltinBuild01ModelInfo() *ModelInfo {
+	return &ModelInfo{
+		ID:                  xaiBuiltinBuild01ModelID,
+		Object:              "model",
+		Created:             1779321600,
+		OwnedBy:             "xai",
+		Type:                "xai",
+		DisplayName:         "Grok Build 0.1",
+		Name:                xaiBuiltinBuild01ModelID,
+		Description:         "Grok Build 0.1 coding model for agentic software engineering workflows.",
+		ContextLength:       256000,
+		MaxCompletionTokens: 256000,
+	}
+}
+
+func xaiBuiltinBuildLatestModelInfo() *ModelInfo {
+	return xaiBuiltinBuildAliasModelInfo(
+		xaiBuiltinBuildLatestModelID,
+		"Grok Build Latest",
+		"Grok Build latest alias (canonicalized to grok-build upstream).",
+	)
+}
+
+func xaiBuiltinBuildAliasModelInfo(id, displayName, description string) *ModelInfo {
+	return &ModelInfo{
+		ID:                  id,
+		Object:              "model",
+		Created:             1779321600,
+		OwnedBy:             "xai",
+		Type:                "xai",
+		DisplayName:         displayName,
+		Name:                id,
+		Description:         description,
+		ContextLength:       256000,
+		MaxCompletionTokens: 256000,
 	}
 }
 

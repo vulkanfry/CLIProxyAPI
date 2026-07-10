@@ -424,7 +424,7 @@ func (e *XAIWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *cliprox
 	if err != nil {
 		return nil, err
 	}
-	wsHeaders := applyXAIWebsocketHeaders(http.Header{}, auth, token, prepared.sessionID)
+	wsHeaders := applyXAIWebsocketHeadersWithModel(http.Header{}, auth, token, prepared.sessionID, prepared.baseModel)
 	wsReqBody := buildXAIWebsocketRequestBody(prepared.body)
 	warmupRequest := xaiWebsocketGenerateFalse(wsReqBody)
 
@@ -1206,6 +1206,10 @@ func buildXAIResponsesWebsocketURL(httpURL string) (string, error) {
 }
 
 func applyXAIWebsocketHeaders(headers http.Header, auth *cliproxyauth.Auth, token string, sessionID string) http.Header {
+	return applyXAIWebsocketHeadersWithModel(headers, auth, token, sessionID, "")
+}
+
+func applyXAIWebsocketHeadersWithModel(headers http.Header, auth *cliproxyauth.Auth, token string, sessionID string, model string) http.Header {
 	if headers == nil {
 		headers = http.Header{}
 	}
@@ -1216,6 +1220,7 @@ func applyXAIWebsocketHeaders(headers http.Header, auth *cliproxyauth.Auth, toke
 	if sessionID != "" {
 		headers.Set("x-grok-conv-id", sessionID)
 	}
+	applyXAIGrokBuildClientHeaders(headers, auth, model)
 	var attrs map[string]string
 	if auth != nil {
 		attrs = auth.Attributes

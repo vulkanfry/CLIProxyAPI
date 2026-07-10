@@ -4,13 +4,18 @@ package xai
 import "time"
 
 const (
-	// DefaultAPIBaseURL is the default xAI Responses API base URL.
+	// DefaultAPIBaseURL is the default xAI Responses API base URL (API keys + OAuth).
 	DefaultAPIBaseURL = "https://api.x.ai/v1"
+	// CLIChatProxyBaseURL is the Grok Build CLI subscription proxy (OAuth).
+	// Official Grok Build defaults to this host; set auth base_url to use it.
+	// See: https://x.ai/cli and GROK_CLI_CHAT_PROXY_BASE_URL.
+	CLIChatProxyBaseURL = "https://cli-chat-proxy.grok.com/v1"
 	// Issuer is xAI's OAuth issuer.
 	Issuer = "https://auth.x.ai"
 	// DiscoveryURL is the OIDC discovery endpoint used to resolve OAuth endpoints.
 	DiscoveryURL = Issuer + "/.well-known/openid-configuration"
 	// ClientID is the public xAI Grok CLI OAuth client ID.
+	// Shared with the official Grok Build / Grok CLI install (OIDC public client).
 	ClientID = "b1a00492-073a-47ea-816f-4c329264a828"
 	// Scope is the OAuth scope set required for xAI API access.
 	Scope = "openid profile email offline_access grok-cli:access api:access"
@@ -20,6 +25,9 @@ const (
 	CallbackPort = 56121
 	// RedirectPath is the loopback callback path registered by the xAI client.
 	RedirectPath = "/callback"
+	// TokenAuthCLI is the X-XAI-Token-Auth value Grok Build sends so middleware
+	// treats the bearer token as a CLI OAuth session (not a pure API key).
+	TokenAuthCLI = "xai-grok-cli"
 )
 
 var refreshLead = 5 * time.Minute

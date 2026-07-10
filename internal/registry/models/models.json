@@ -2417,6 +2417,18 @@
   ],
   "xai": [
     {
+      "id": "grok-build",
+      "object": "model",
+      "created": 1779321600,
+      "owned_by": "xai",
+      "type": "xai",
+      "display_name": "Grok Build",
+      "name": "grok-build",
+      "description": "Grok Build default coding model (official Grok Build CLI / cli-chat-proxy).",
+      "context_length": 256000,
+      "max_completion_tokens": 256000
+    },
+    {
       "id": "grok-build-0.1",
       "object": "model",
       "created": 1779321600,
@@ -2425,6 +2437,18 @@
       "display_name": "Grok Build 0.1",
       "name": "grok-build-0.1",
       "description": "Grok Build 0.1 is xAI’s fast coding model trained specifically for agentic software engineering workflows.",
+      "context_length": 256000,
+      "max_completion_tokens": 256000
+    },
+    {
+      "id": "grok-build-latest",
+      "object": "model",
+      "created": 1779321600,
+      "owned_by": "xai",
+      "type": "xai",
+      "display_name": "Grok Build Latest",
+      "name": "grok-build-latest",
+      "description": "Grok Build latest alias (maps to grok-build upstream).",
       "context_length": 256000,
       "max_completion_tokens": 256000
     },

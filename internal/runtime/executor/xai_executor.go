@@ -62,8 +62,19 @@ const (
 	xaiVideosEditsPath          = "/videos/edits"
 	xaiVideosExtensionsPath     = "/videos/extensions"
 	xaiVideosPath               = "/videos"
-	xaiIdempotencyKeyMetaKey    = "idempotency_key"
-	xaiComposerModelPrefix      = "grok-composer-"
+	xaiIdempotencyKeyMetaKey = "idempotency_key"
+	xaiComposerModelPrefix   = "grok-composer-"
+	xaiBuildModelPrefix      = "grok-build"
+	// Grok Build CLI headers (mined from official binary + install docs).
+	// cli-chat-proxy uses these for auth middleware + inference cluster routing.
+	xaiTokenAuthHeader          = "X-XAI-Token-Auth"
+	xaiClientVersionHeader      = "x-grok-client-version"
+	xaiClientSurfaceHeader      = "x-grok-client-surface"
+	xaiClientIdentifierHeader   = "x-grok-client-identifier"
+	xaiModelOverrideHeader      = "x-grok-model-override"
+	xaiReqIDHeader              = "x-grok-req-id"
+	xaiClientSurfaceCLIProxy    = "cli-proxy-api"
+	xaiClientVersionCLIProxy    = "cli-proxy-api"
 	// Tool-count ceiling for xAI Responses.
 	// - HTTP Responses hard-fails around ~200 tools (400 "Maximum tools limit reached").
 	// - Official xai-sdk-python documents max 128 client-side function tools on Chat/gRPC.
@@ -93,14 +104,7 @@ func (e *XAIExecutor) PrepareRequest(req *http.Request, auth *cliproxyauth.Auth)
 		return nil
 	}
 	token, _ := xaiCreds(auth)
-	if strings.TrimSpace(token) != "" {
-		req.Header.Set("Authorization", "Bearer "+token)
-	}
-	var attrs map[string]string
-	if auth != nil {
-		attrs = auth.Attributes
-	}
-	util.ApplyCustomHeadersFromAttrs(req, attrs)
+	applyXAIHeaders(req, auth, token, false, "", "")
 	return nil
 }
 
@@ -150,7 +154,7 @@ func (e *XAIExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, req 
 	if err != nil {
 		return resp, err
 	}
-	applyXAIHeaders(httpReq, auth, token, true, prepared.sessionID)
+	applyXAIHeaders(httpReq, auth, token, true, prepared.sessionID, prepared.baseModel)
 	e.recordXAIRequest(ctx, auth, url, httpReq.Header.Clone(), prepared.body)
 
 	httpClient := helps.NewProxyAwareHTTPClient(ctx, e.cfg, auth, 0)
@@ -244,7 +248,7 @@ func (e *XAIExecutor) executeCompactRequest(ctx context.Context, auth *cliproxya
 	if err != nil {
 		return nil, nil, nil, err
 	}
-	applyXAIHeaders(httpReq, auth, token, false, prepared.sessionID)
+	applyXAIHeaders(httpReq, auth, token, false, prepared.sessionID, prepared.baseModel)
 	e.recordXAIRequest(ctx, auth, requestURL, httpReq.Header.Clone(), prepared.body)
 
 	httpClient := helps.NewProxyAwareHTTPClient(ctx, e.cfg, auth, 0)
@@ -485,7 +489,7 @@ func (e *XAIExecutor) executeImages(ctx context.Context, auth *cliproxyauth.Auth
 	if err != nil {
 		return resp, err
 	}
-	applyXAIHeaders(httpReq, auth, token, false, "")
+	applyXAIHeaders(httpReq, auth, token, false, "", thinking.ParseSuffix(req.Model).ModelName)
 	e.recordXAIRequest(ctx, auth, url, httpReq.Header.Clone(), req.Payload)
 
 	httpClient := helps.NewProxyAwareHTTPClient(ctx, e.cfg, auth, 0)
@@ -541,7 +545,7 @@ func (e *XAIExecutor) executeVideos(ctx context.Context, auth *cliproxyauth.Auth
 	if err != nil {
 		return resp, err
 	}
-	applyXAIHeaders(httpReq, auth, token, false, "")
+	applyXAIHeaders(httpReq, auth, token, false, "", thinking.ParseSuffix(req.Model).ModelName)
 	if method == http.MethodPost {
 		key := xaiMetadataString(opts.Metadata, xaiIdempotencyKeyMetaKey)
 		if key == "" && opts.Headers != nil {
@@ -608,7 +612,7 @@ func (e *XAIExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Auth
 	if err != nil {
 		return nil, err
 	}
-	applyXAIHeaders(httpReq, auth, token, true, prepared.sessionID)
+	applyXAIHeaders(httpReq, auth, token, true, prepared.sessionID, prepared.baseModel)
 	e.recordXAIRequest(ctx, auth, url, httpReq.Header.Clone(), prepared.body)
 
 	httpClient := helps.NewProxyAwareHTTPClient(ctx, e.cfg, auth, 0)
@@ -828,7 +832,7 @@ func (e *XAIExecutor) prepareResponsesRequest(ctx context.Context, req cliproxye
 }
 
 func (e *XAIExecutor) prepareResponsesRequestTo(ctx context.Context, req cliproxyexecutor.Request, opts cliproxyexecutor.Options, stream bool, to sdktranslator.Format) (*xaiPreparedRequest, error) {
-	baseModel := thinking.ParseSuffix(req.Model).ModelName
+	baseModel := xaiCanonicalModelName(thinking.ParseSuffix(req.Model).ModelName)
 	from := opts.SourceFormat
 	responseFormat := cliproxyexecutor.ResponseFormatOrSource(opts)
 	originalPayloadSource := req.Payload
@@ -928,7 +932,10 @@ func xaiCreds(auth *cliproxyauth.Auth) (token, baseURL string) {
 	return token, baseURL
 }
 
-func applyXAIHeaders(r *http.Request, auth *cliproxyauth.Auth, token string, stream bool, sessionID string) {
+func applyXAIHeaders(r *http.Request, auth *cliproxyauth.Auth, token string, stream bool, sessionID string, model string) {
+	if r == nil {
+		return
+	}
 	r.Header.Set("Content-Type", "application/json")
 	if strings.TrimSpace(token) != "" {
 		r.Header.Set("Authorization", "Bearer "+token)
@@ -942,11 +949,125 @@ func applyXAIHeaders(r *http.Request, auth *cliproxyauth.Auth, token string, str
 	if sessionID != "" {
 		r.Header.Set("x-grok-conv-id", sessionID)
 	}
+	applyXAIGrokBuildClientHeaders(r.Header, auth, model)
 	var attrs map[string]string
 	if auth != nil {
 		attrs = auth.Attributes
 	}
+	// Custom attrs win last so operators can override client surface/version.
 	util.ApplyCustomHeadersFromAttrs(r, attrs)
+}
+
+// applyXAIGrokBuildClientHeaders mirrors the Grok Build CLI fingerprint so
+// cli-chat-proxy (and api.x.ai OAuth middleware) accept subscription tokens and
+// route to the correct inference cluster via x-grok-model-override.
+func applyXAIGrokBuildClientHeaders(headers http.Header, auth *cliproxyauth.Auth, model string) {
+	if headers == nil {
+		return
+	}
+	if xaiIsOAuthAuth(auth) {
+		// Official Grok Build curl example:
+		//   -H "X-XAI-Token-Auth: xai-grok-cli"
+		if headers.Get(xaiTokenAuthHeader) == "" {
+			headers.Set(xaiTokenAuthHeader, xaiauth.TokenAuthCLI)
+		}
+	}
+	if headers.Get(xaiClientVersionHeader) == "" {
+		headers.Set(xaiClientVersionHeader, xaiClientVersionCLIProxy)
+	}
+	if headers.Get(xaiClientSurfaceHeader) == "" {
+		headers.Set(xaiClientSurfaceHeader, xaiClientSurfaceCLIProxy)
+	}
+	if headers.Get(xaiClientIdentifierHeader) == "" {
+		if id := xaiClientIdentifier(auth); id != "" {
+			headers.Set(xaiClientIdentifierHeader, id)
+		}
+	}
+	if model = strings.TrimSpace(model); model != "" && headers.Get(xaiModelOverrideHeader) == "" {
+		headers.Set(xaiModelOverrideHeader, model)
+	}
+	if headers.Get(xaiReqIDHeader) == "" {
+		headers.Set(xaiReqIDHeader, uuid.NewString())
+	}
+}
+
+func xaiIsOAuthAuth(auth *cliproxyauth.Auth) bool {
+	if auth == nil {
+		return false
+	}
+	if auth.Attributes != nil {
+		if kind := strings.ToLower(strings.TrimSpace(auth.Attributes["auth_kind"])); kind == "oauth" {
+			return true
+		}
+		// Pure API-key auths store api_key and usually no oauth access_token.
+		if strings.TrimSpace(auth.Attributes["api_key"]) != "" &&
+			strings.TrimSpace(auth.Attributes["access_token"]) == "" &&
+			(auth.Metadata == nil || strings.TrimSpace(xaiMetadataString(auth.Metadata, "access_token")) == "") {
+			return false
+		}
+	}
+	if auth.Metadata != nil {
+		if kind := strings.ToLower(strings.TrimSpace(xaiMetadataString(auth.Metadata, "auth_kind"))); kind == "oauth" {
+			return true
+		}
+		if strings.TrimSpace(xaiMetadataString(auth.Metadata, "access_token")) != "" &&
+			strings.TrimSpace(xaiMetadataString(auth.Metadata, "refresh_token")) != "" {
+			return true
+		}
+		if strings.TrimSpace(xaiMetadataString(auth.Metadata, "access_token")) != "" &&
+			strings.EqualFold(strings.TrimSpace(xaiMetadataString(auth.Metadata, "type")), "xai") {
+			return true
+		}
+	}
+	return false
+}
+
+func xaiClientIdentifier(auth *cliproxyauth.Auth) string {
+	if auth == nil {
+		return xaiClientSurfaceCLIProxy
+	}
+	if auth.Attributes != nil {
+		if id := strings.TrimSpace(auth.Attributes["client_identifier"]); id != "" {
+			return id
+		}
+		if id := strings.TrimSpace(auth.Attributes["sub"]); id != "" {
+			return id
+		}
+	}
+	if auth.Metadata != nil {
+		if id := xaiMetadataString(auth.Metadata, "sub"); id != "" {
+			return id
+		}
+		if id := xaiMetadataString(auth.Metadata, "email"); id != "" {
+			return id
+		}
+	}
+	if id := strings.TrimSpace(auth.ID); id != "" {
+		return id
+	}
+	return xaiClientSurfaceCLIProxy
+}
+
+// xaiCanonicalModelName maps Grok Build agent/persona model IDs (from the
+// official CLI binary) onto API-accepted model names.
+func xaiCanonicalModelName(model string) string {
+	trimmed := strings.TrimSpace(model)
+	if trimmed == "" {
+		return trimmed
+	}
+	lower := strings.ToLower(trimmed)
+	// Strip thinking-effort suffixes like "grok-build(high)" already handled by ParseSuffix.
+	switch lower {
+	case "grok-build-latest",
+		"grok-build-plan",
+		"grok-build-plan-no-subagents",
+		"grok-build-concise",
+		"grok-build-ask-user",
+		"grok-build-orchestrator":
+		return "grok-build"
+	default:
+		return trimmed
+	}
 }
 
 func xaiResolveComposerSessionID(ctx context.Context, req cliproxyexecutor.Request, opts cliproxyexecutor.Options, baseModel string) (string, error) {
@@ -980,7 +1101,12 @@ func xaiExecutionSessionID(req cliproxyexecutor.Request, opts cliproxyexecutor.O
 }
 
 func xaiRequiresIsolatedConversation(model string) bool {
-	return strings.HasPrefix(strings.ToLower(strings.TrimSpace(model)), xaiComposerModelPrefix)
+	m := strings.ToLower(strings.TrimSpace(model))
+	// Composer and Grok Build coding models benefit from sticky conv / cache keys.
+	return strings.HasPrefix(m, xaiComposerModelPrefix) ||
+		m == xaiBuildModelPrefix ||
+		strings.HasPrefix(m, xaiBuildModelPrefix+"-") ||
+		strings.HasPrefix(m, xaiBuildModelPrefix+".")
 }
 
 func xaiImageEndpointPath(opts cliproxyexecutor.Options) string {
