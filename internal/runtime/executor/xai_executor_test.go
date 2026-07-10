@@ -139,9 +139,9 @@ func TestXAIExecutorExecuteShapesResponsesRequest(t *testing.T) {
 			t.Fatalf("tools.%d.name = apply_patch, want removed; body=%s", i, string(gotBody))
 		}
 		switch tool.Get("name").String() {
-		case "automation_update":
+		case "automation_update", "codex_app.automation_update":
 			foundAutomationUpdate = true
-		case "namespace_custom":
+		case "namespace_custom", "codex_app.namespace_custom":
 			foundNamespaceCustom = true
 		}
 		if toolType == "web_search" {
@@ -668,9 +668,9 @@ func TestXAIExecutorExecuteStreamFiltersToolSearchTool(t *testing.T) {
 			t.Fatalf("tools.%d.name = apply_patch, want removed; body=%s", i, string(gotBody))
 		}
 		switch tool.Get("name").String() {
-		case "automation_update":
+		case "automation_update", "codex_app.automation_update":
 			foundAutomationUpdate = true
-		case "namespace_custom":
+		case "namespace_custom", "codex_app.namespace_custom":
 			foundNamespaceCustom = true
 		}
 		if toolType == "web_search" {
@@ -1075,7 +1075,7 @@ func TestNormalizeXAITools_SimplifiesCodexAppAutomationUpdateSchema(t *testing.T
 	foundExec := false
 	for _, tool := range tools.Array() {
 		switch tool.Get("name").String() {
-		case "automation_update":
+		case "automation_update", "codex_app.automation_update":
 			foundAuto = true
 			paramsRaw := tool.Get("parameters").Raw
 			if strings.Contains(paramsRaw, `"oneOf"`) || strings.Contains(paramsRaw, `"$defs"`) {
@@ -1726,5 +1726,73 @@ func TestCapXAITools_PrioritizesCoreAndDropsExcess(t *testing.T) {
 	}
 	if !foundWeb || !foundShell {
 		t.Fatalf("core tools missing web=%v shell=%v body sample=%s", foundWeb, foundShell, string(out)[:300])
+	}
+}
+
+func TestNormalizeXAIInputWebSearchAndImageGenerationCalls(t *testing.T) {
+	body := []byte(`{
+		"model":"grok-4.5",
+		"input":[
+			{"type":"message","role":"user","content":[{"type":"input_text","text":"hi"}]},
+			{"type":"web_search_call","id":"ws1","status":"completed","action":{"type":"search","query":"rust"}},
+			{"type":"image_generation_call","id":"ig1","status":"completed","result":"base64"},
+			{"type":"tool_search_call","call_id":"ts1","execution":"default","arguments":{"query":"x"},"status":"completed"},
+			{"type":"tool_search_output","call_id":"ts1","status":"completed","execution":"default","tools":[]},
+			{"type":"compaction_trigger"},
+			{"type":"additional_tools","role":"system","tools":[{"type":"function","name":"x"}]},
+			{"type":"function_call","call_id":"f1","name":"spawn_agent","namespace":"agents","arguments":"{\"p\":1}\"}"}
+		]
+	}`)
+	// fix broken json above - rewrite cleanly
+	_ = body
+	body = []byte(`{
+		"model":"grok-4.5",
+		"input":[
+			{"type":"message","role":"user","content":[{"type":"input_text","text":"hi"}]},
+			{"type":"web_search_call","id":"ws1","status":"completed","action":{"type":"search","query":"rust"}},
+			{"type":"image_generation_call","id":"ig1","status":"completed","result":"base64"},
+			{"type":"tool_search_call","call_id":"ts1","execution":"default","arguments":{"query":"x"},"status":"completed"},
+			{"type":"tool_search_output","call_id":"ts1","status":"completed","execution":"default","tools":[]},
+			{"type":"compaction_trigger"},
+			{"type":"additional_tools","role":"system","tools":[{"type":"function","name":"x"}]},
+			{"type":"function_call","call_id":"f1","name":"spawn_agent","namespace":"agents","arguments":"{\"p\":1}"}
+		]
+	}`)
+	out := normalizeXAIInputCustomToolItems(body)
+	types := []string{}
+	for _, item := range gjson.GetBytes(out, "input").Array() {
+		types = append(types, item.Get("type").String())
+	}
+	// compaction_trigger + additional_tools dropped
+	// web/image/tool_search -> function_call, tool_search_output -> function_call_output
+	// function_call sanitized (namespace folded into name)
+	want := []string{"message", "function_call", "function_call", "function_call", "function_call_output", "function_call"}
+	if len(types) != len(want) {
+		t.Fatalf("types=%v want %v body=%s", types, want, string(out))
+	}
+	for i := range want {
+		if types[i] != want[i] {
+			t.Fatalf("types=%v want %v", types, want)
+		}
+	}
+	if got := gjson.GetBytes(out, "input.1.call_id").String(); got != "ws1" {
+		t.Fatalf("web_search call_id=%q", got)
+	}
+	if got := gjson.GetBytes(out, "input.5.name").String(); got != "agents.spawn_agent" {
+		t.Fatalf("namespaced fn name=%q body=%s", got, string(out))
+	}
+}
+
+func TestNormalizeXAITool_ShellToFunction(t *testing.T) {
+	tool := gjson.Parse(`{"type":"shell"}`)
+	raw, changed, ok := normalizeXAITool(tool, "")
+	if !ok || !changed {
+		t.Fatalf("ok=%v changed=%v", ok, changed)
+	}
+	if gjson.GetBytes(raw, "type").String() != "function" {
+		t.Fatalf("type=%s raw=%s", gjson.GetBytes(raw, "type").String(), string(raw))
+	}
+	if gjson.GetBytes(raw, "name").String() != "shell" {
+		t.Fatalf("name=%s", gjson.GetBytes(raw, "name").String())
 	}
 }

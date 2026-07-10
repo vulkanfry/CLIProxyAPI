@@ -1,28 +1,49 @@
 # Fork: vulkanfry/CLIProxyAPI
 
-Fork of [router-for-me/CLIProxyAPI](https://github.com/router-for-me/CLIProxyAPI) with Codex multi-agent / xAI Responses compatibility patches.
+Fork of [router-for-me/CLIProxyAPI](https://github.com/router-for-me/CLIProxyAPI) with **Codex → xAI/Grok Responses** compatibility.
 
-## Patch branch
+Default branch: **`main-xai-codex`**
 
-Use **`main-xai-codex`** (or `fix/xai-custom-tool-modelinput`).
+## Why this fork exists
 
-### What it fixes
-
-When Codex `multi_agent_v2` subagents call Grok via local Quotio/CLIProxyAPI:
-
-1. **`agent_message` + `encrypted_content`** → mapped to normal `message` (xAI has no `agent_message` ModelInput variant)
-2. **`custom_tool_call*` / `shell_call` / hosted tool history** → `function_call*`
-3. **MCP namespace fan-out** past xAI’s tool limit → cap at 190 (prefer core/web_search)
-4. Drop unsupported tool types like `computer_use_preview`
-
-Without this, typical errors:
+Codex (including multi_agent_v2, tools, MCP namespaces, shell history) speaks OpenAI Responses wire format. xAI Grok accepts a **subset**. Without adaptation you get:
 
 ```text
-422 ... untagged enum ModelInput
-400 ... Maximum tools limit reached ... maximum is 200
+422 ModelInput (agent_message, shell_call, custom_tool_call, web_search_call, ...)
+400 Maximum tools limit reached (namespace MCP fan-out > 200)
+422 missing field environment (type=shell tool)
+400 MCP server URL resolves to internal address
 ```
 
-## Install over Quotio upstream binary
+## Compatibility matrix (normalized before upstream)
+
+### Input items
+| Codex / OpenAI item | xAI handling |
+|---|---|
+| `message` | keep; strip phase/passthrough; `output_text`→`input_text` in history |
+| `agent_message` | → `message` (author/recipient prefix; drop encrypted blob) |
+| `function_call` | rebuild clean; null args→`{}`; fold `namespace` into name |
+| `function_call_output` | string output (arrays/objects flattened) |
+| `custom_tool_call*` | → `function_call*` |
+| `local_shell_call` / `shell_call` | → `function_call` (+ output) |
+| `web_search_call` / `image_generation_call` / `tool_search_call` | → clean `function_call` (id→call_id) |
+| `compaction` / `reasoning` | keep (sanitize encrypted_content) |
+| `context_compaction` | → `compaction` when possible |
+| `compaction_trigger` / `additional_tools` / `item_reference` | drop |
+| unknown | drop (avoid 422) |
+
+### Tools
+| Tool type | Handling |
+|---|---|
+| `function` / `web_search` / `code_interpreter` | keep |
+| `namespace` | flatten nested tools; prefix `namespace.name` |
+| `custom` | → `function` (+ input param schema) |
+| `shell` | → `function` named shell (xAI needs environment) |
+| `tool_search` / `image_generation` / `computer_use_preview` | drop |
+| `mcp` | drop (private URL / validation issues) |
+| after flatten | **cap 190** tools (prefer core/web_search; drop excess MCP) |
+
+## Install into Quotio
 
 ```bash
 git clone -b main-xai-codex https://github.com/vulkanfry/CLIProxyAPI.git
@@ -34,16 +55,14 @@ mkdir -p "$UP/v7.2.61-custom-tool-fix"
 cp CLIProxyAPI "$UP/v7.2.61-custom-tool-fix/CLIProxyAPI"
 chmod +x "$UP/v7.2.61-custom-tool-fix/CLIProxyAPI"
 ln -sfn "$UP/v7.2.61-custom-tool-fix" "$UP/current"
-# restart CLIProxyAPI / Quotio
+# restart Quotio / kill CLIProxyAPI on :18317 so it reloads
 ```
 
 ## Upstream sync
 
-GitHub Action `.github/workflows/sync-upstream.yml`:
+`.github/workflows/sync-upstream.yml` daily + manual:
+- FF `main` from `router-for-me/CLIProxyAPI`
+- rebase `main-xai-codex`
+- open issue on conflict
 
-- daily cron + manual `workflow_dispatch`
-- fast-forwards `main` from `router-for-me/CLIProxyAPI`
-- rebases `main-xai-codex` onto upstream; force-with-lease push
-- on conflict, opens/comments an issue labeled `upstream-sync`
-
-Trigger manually: **Actions → Sync upstream → Run workflow**.
+Actions → **Sync upstream** → Run workflow.
