@@ -63,8 +63,10 @@ const (
 	xaiVideosExtensionsPath     = "/videos/extensions"
 	xaiVideosPath               = "/videos"
 	xaiIdempotencyKeyMetaKey = "idempotency_key"
-	xaiComposerModelPrefix   = "grok-composer-"
-	xaiBuildModelPrefix      = "grok-build"
+	xaiComposerModelPrefix = "grok-composer-"
+	xaiBuildModelPrefix    = "grok-build"
+	// Primary coding model for this deployment — sticky sessions like composer/build.
+	xaiPrimaryCodingModel = "grok-4.5"
 	// Grok Build CLI headers (mined from official binary + install docs).
 	// cli-chat-proxy uses these for auth middleware + inference cluster routing.
 	xaiTokenAuthHeader          = "X-XAI-Token-Auth"
@@ -1102,8 +1104,10 @@ func xaiExecutionSessionID(req cliproxyexecutor.Request, opts cliproxyexecutor.O
 
 func xaiRequiresIsolatedConversation(model string) bool {
 	m := strings.ToLower(strings.TrimSpace(model))
-	// Composer and Grok Build coding models benefit from sticky conv / cache keys.
-	return strings.HasPrefix(m, xaiComposerModelPrefix) ||
+	// Primary coding (grok-4.5), Composer, and Grok Build benefit from sticky conv / cache keys.
+	return m == xaiPrimaryCodingModel ||
+		strings.HasPrefix(m, xaiPrimaryCodingModel+"-") ||
+		strings.HasPrefix(m, xaiComposerModelPrefix) ||
 		m == xaiBuildModelPrefix ||
 		strings.HasPrefix(m, xaiBuildModelPrefix+"-") ||
 		strings.HasPrefix(m, xaiBuildModelPrefix+".")

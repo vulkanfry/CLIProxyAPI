@@ -34,6 +34,7 @@ func TestWithXAIBuiltinsIncludesVideoPreviewModel(t *testing.T) {
 func TestWithXAIBuiltinsIncludesGrokBuildModels(t *testing.T) {
 	models := WithXAIBuiltins(nil)
 	want := map[string]bool{
+		xaiBuiltinPrimaryModelID:      false,
 		xaiBuiltinBuildModelID:        false,
 		xaiBuiltinBuild01ModelID:      false,
 		xaiBuiltinBuildLatestModelID:  false,
@@ -53,7 +54,18 @@ func TestWithXAIBuiltinsIncludesGrokBuildModels(t *testing.T) {
 			t.Fatalf("expected xAI builtin model %s", id)
 		}
 	}
+	// Primary must keep thinking levels for reasoning.effort passthrough.
+	for _, model := range models {
+		if model != nil && model.ID == xaiBuiltinPrimaryModelID {
+			if model.Thinking == nil || len(model.Thinking.Levels) == 0 {
+				t.Fatalf("grok-4.5 builtin must include thinking levels")
+			}
+			return
+		}
+	}
 }
+
+
 
 func TestAntigravityWebSearchModelForRequiresRequestedModelCapability(t *testing.T) {
 	registryRef := GetGlobalRegistry()

@@ -13,12 +13,15 @@ const (
 	xaiBuiltinImageQualityModelID   = "grok-imagine-image-quality"
 	xaiBuiltinVideoModelID          = "grok-imagine-video"
 	xaiBuiltinVideo15PreviewModelID = "grok-imagine-video-1.5-preview"
+	// Primary coding model for this deployment (user preference: grok-4.5).
+	// Builtin so remote models.json refresh cannot drop thinking metadata.
+	xaiBuiltinPrimaryModelID = "grok-4.5"
 	// Grok Build coding models (official CLI default + aliases). Kept as
 	// builtins so remote models.json refresh cannot drop them.
-	xaiBuiltinBuildModelID       = "grok-build"
-	xaiBuiltinBuild01ModelID     = "grok-build-0.1"
-	xaiBuiltinBuildLatestModelID = "grok-build-latest"
-	xaiBuiltinBuildPlanModelID   = "grok-build-plan"
+	xaiBuiltinBuildModelID        = "grok-build"
+	xaiBuiltinBuild01ModelID      = "grok-build-0.1"
+	xaiBuiltinBuildLatestModelID  = "grok-build-latest"
+	xaiBuiltinBuildPlanModelID    = "grok-build-plan"
 	xaiBuiltinBuildConciseModelID = "grok-build-concise"
 )
 
@@ -124,10 +127,12 @@ func WithCodexBuiltins(models []*ModelInfo) []*ModelInfo {
 	return upsertModelInfos(models, codexBuiltinImage15ModelInfo(), codexBuiltinImageModelInfo())
 }
 
-// WithXAIBuiltins injects hard-coded xAI image/video + Grok Build model
-// definitions that should not depend on remote models.json updates.
+// WithXAIBuiltins injects hard-coded xAI primary coding + image/video + Grok Build
+// model definitions that should not depend on remote models.json updates.
 func WithXAIBuiltins(models []*ModelInfo) []*ModelInfo {
 	return upsertModelInfos(models,
+		// Primary first: grok-4.5 is the main coding model for this stack.
+		xaiBuiltinPrimaryModelInfo(),
 		xaiBuiltinImageModelInfo(),
 		xaiBuiltinImageQualityModelInfo(),
 		xaiBuiltinVideoModelInfo(),
@@ -169,6 +174,25 @@ func codexBuiltinImageModelInfo() *ModelInfo {
 		Type:        "openai",
 		DisplayName: "GPT Image 2",
 		Version:     codexBuiltinImageModelID,
+	}
+}
+
+func xaiBuiltinPrimaryModelInfo() *ModelInfo {
+	return &ModelInfo{
+		ID:                  xaiBuiltinPrimaryModelID,
+		Object:              "model",
+		Created:             1783526400,
+		OwnedBy:             "xai",
+		Type:                "xai",
+		DisplayName:         "Grok 4.5",
+		Name:                xaiBuiltinPrimaryModelID,
+		Description:         "Primary xAI coding model for agentic software engineering (default for this CLIProxy stack).",
+		ContextLength:       500000,
+		MaxCompletionTokens: 65536,
+		Thinking: &ThinkingSupport{
+			ZeroAllowed: false,
+			Levels:      []string{"low", "medium", "high"},
+		},
 	}
 }
 

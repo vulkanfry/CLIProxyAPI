@@ -193,6 +193,12 @@ func TestXAIExecutorComposerSessionIsolation(t *testing.T) {
 			wantGenerated: true,
 		},
 		{
+			name:          "primary_grok_4_5_generates_fresh_session",
+			model:         "grok-4.5",
+			payload:       []byte(`{"model":"grok-4.5","input":"hello"}`),
+			wantGenerated: true,
+		},
+		{
 			name:        "explicit_prompt_cache_key_is_preserved",
 			model:       "grok-composer-2.5-fast",
 			payload:     []byte(`{"model":"grok-composer-2.5-fast","prompt_cache_key":"client-session","input":"hello"}`),
